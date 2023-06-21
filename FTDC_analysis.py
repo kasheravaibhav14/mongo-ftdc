@@ -16,10 +16,10 @@ class FTDC_an:
         self.metricObj = metricObj
         self.queryTimeStamp = qTstamp
         self.ticketlim = 15  # when available tickets are more than 15, we assume that the system is in normal state or is heading toward crash
-        self.tdelta = 10
+        self.tdelta = 30
         self.threshold = 0.25
 
-    def __plot(self, df, to_monitor, vert_x):
+    def __plot(self, df, to_monitor, vert_x, outfilename="fig.pdf"):
         to_monitor.sort()
         print("Monitoring: ", str(to_monitor))
         print(len(to_monitor))
@@ -29,11 +29,15 @@ class FTDC_an:
         for i in range(len(to_monitor)):
             fig.add_trace(go.Scatter(
                 x=df.index, y=df[to_monitor[i]]), 1+i//n_cols, 1+i % n_cols)
-            fig.add_shape(type='line', x0=vert_x, y0=min(df[to_monitor[i]]), x1=vert_x, y1=1.15*max(
-                df[to_monitor[i]]), line=dict(width=1, dash='dot'), row=1+i//n_cols, col=1+i % n_cols)
             max_val = df[to_monitor[i]].max()
             min_val = df[to_monitor[i]].min()
             mean_val = df[to_monitor[i]].mean()
+            # print(max_val,min_val,mean_val)
+            if type(vert_x)==list:
+                for vx in vert_x:
+                    fig.add_shape(type='line', x0=vx, y0=min_val, x1=vx, y1=1.15*max_val, line=dict(width=1, dash='dot'), row=1+i//n_cols, col=1+i % n_cols)
+            else:
+                fig.add_shape(type='line', x0=vert_x, y0=min_val, x1=vert_x, y1=1.15*max_val, line=dict(width=1, dash='dot'), row=1+i//n_cols, col=1+i % n_cols)
             fig.add_annotation(x=df.index[0], y=max_val, text=f'Max: {max_val:.2f}<br>Mean: {mean_val:.2f}',
                                showarrow=False,
                                font=dict(color='black', size=8),
@@ -44,7 +48,7 @@ class FTDC_an:
                           b=20,
                           t=20,
                           pad=5))
-        fig.write_image("fig.pdf", 'pdf', width=n_cols *
+        fig.write_image(outfilename, 'pdf', width=n_cols *
                         800, height=n_rows*125, scale=1)
 
     def __renameCols(self, df):
@@ -54,7 +58,7 @@ class FTDC_an:
             ccol = ccol.replace("wiredTiger.", "wt ")
             ccol = ccol.replace("systemMetrics.", "sm ")
             ccol = ccol.replace("tcmalloc.tcmalloc", "tcmalloc")
-            ccol = ccol.replace("transaction.transaction", "txn")
+            # ccol = ccol.replace("transaction.transaction", "txn")
             ccol = ccol.replace("transaction.", "txn ")
             ccol = ccol.replace("local.oplog.rs.stats.", "locOplogRsStats ")
             ccol = ccol.replace("aggStageCounters.", "aggCnt ")
@@ -66,10 +70,8 @@ class FTDC_an:
         curr_mean = {}
         prev_mean = {}
         for col in df.columns:
-            curr_mean[col] = df.iloc[tbounds['c_lb']
-                :tbounds['c_ub']+1][col].mean()
-            prev_mean[col] = df.iloc[tbounds['p_lb']
-                :tbounds['c_lb']+1][col].mean()
+            curr_mean[col] = df.iloc[tbounds['c_lb']:tbounds['c_ub']+1][col].mean()
+            prev_mean[col] = df.iloc[tbounds['p_lb']:tbounds['c_lb']+1][col].mean()
         return curr_mean, prev_mean
 
     def __findOutliersWithZscore(self, df, field):
@@ -114,6 +116,22 @@ class FTDC_an:
     def getDTFromSecs(self, ms):
         return datetime.fromtimestamp(ms/1000)
 
+    def __getDirtyFillRatio(self, metricObj):
+        total_cache = metricObj["serverStatus.wiredTiger.cache.bytes currently in the cache"]
+        dirty_cache = metricObj["serverStatus.wiredTiger.cache.tracked dirty bytes in the cache"]
+        metricObj["ss wt cache dirty fill ratio"] = []
+        for idx in range(len(total_cache)):
+            ratio = dirty_cache[idx] / total_cache[idx]
+            metricObj["ss wt cache dirty fill ratio"].append(ratio)
+    
+    def __getCacheFillRatio(self, metricObj):
+        total_cache = metricObj["serverStatus.wiredTiger.cache.maximum bytes configured"]
+        curr_cache = metricObj["serverStatus.wiredTiger.cache.bytes currently in the cache"]
+        metricObj["ss wt cache fill ratio"] = []
+        for idx in range(len(total_cache)):
+            ratio = curr_cache[idx] / total_cache[idx]
+            metricObj["ss wt cache fill ratio"].append(ratio)
+
     def __getMemoryFragRatio(self, metricObj):
         tCache = "serverStatus.tcmalloc.generic.current_allocated_bytes"
         trCache = "serverStatus.tcmalloc.generic.heap_size"
@@ -141,10 +159,7 @@ class FTDC_an:
 
     def __tcmallocminuswt(self, metricObj):
         wtcache = "serverStatus.wiredTiger.cache.bytes currently in the cache"
-        #    "serverStatus.wiredTiger.cache.bytes allocated for updates",
-        #    "serverStatus.wiredTiger.cache.bytes dirty in the cache cumulative"]
         tcmalloc = "serverStatus.tcmalloc.generic.current_allocated_bytes"
-        # "serverStatus.tcmalloc.tcmalloc.current_total_thread_cache_bytes"]
         newkey = "serverStatus.wiredTiger.tcmalloc derived: allocated minus wt cache MiB"
         if wtcache not in metricObj or tcmalloc not in metricObj:
             return
@@ -161,7 +176,11 @@ class FTDC_an:
             return True
         if met == "ss wt cache.bytes dirty in the cache cumulative" or (met.startswith("ss wt concurrentTransactions") and not met.endswith("totalTickets")):
             return True
-    def calcBounds(self,df,pos,delt):
+        if met.startswith("ss wt txn"):
+            return True
+        return False
+
+    def calcBounds(self, df, pos, delt):
         tbounds = {'t0': -1, 'c_ub': -1, 'c_lb': -
                    1, 'p_lb': -1}  # p_ub is equal to c_lb
         tdelta = timedelta(seconds=delt)
@@ -182,11 +201,43 @@ class FTDC_an:
                 tbounds['p_lb'] = idx
                 break
         return tbounds
-    
+    def hourlyAnalytics(self,df):
+        to_monitor=[]
+        start=df.index[0]
+        end=min(df.index[-1],start+timedelta(hours=4))
+        curr_mean = {}
+        prev_mean = {}
+        while (start<=end):
+            nxt=start+timedelta(minutes=15)
+            if prev_mean=={}:
+                nxt1=nxt+timedelta(minutes=15)
+                for col in df.columns:
+                    curr_mean[col] = df.loc[start:nxt][col].mean()
+                    prev_mean[col] = df.loc[nxt:nxt1][col].mean()
+                start=nxt1
+            else:
+                prev_mean=curr_mean.copy()
+                for col in df.columns:
+                    curr_mean[col] = df.loc[start:nxt][col].mean()
+                start=nxt
+            # print(curr_mean)
+            for metric in curr_mean:
+                if self.checkMetric(curr_mean,prev_mean,metric) and metric not in to_monitor:
+                    to_monitor.append(metric)
+        vert_x=[]
+        start=df.index[0]
+        while start<end:
+            vert_x.append(end)
+            start=start+timedelta(hours=1)
+        print(vert_x)
+        self.__plot(df,to_monitor,vert_x,"fig_hourly.pdf")
+
     def analytics(self, metricObj, queryTimestamp):
         self.__getAverageLatencies(metricObj)
         self.__tcmallocminuswt(metricObj)
         self.__getMemoryFragRatio(metricObj)
+        self.__getDirtyFillRatio(metricObj)
+        self.__getCacheFillRatio(metricObj)
         un_len = {}  # debug
         for key in metricObj:
             if len(metricObj[key]) not in un_len:
@@ -207,34 +258,48 @@ class FTDC_an:
         df['serverStatus.start'] = pd.to_datetime(df['serverStatus.start'])
         df.set_index('serverStatus.start', inplace=True)
         df.columns.name = 'metrics'
-        # df.to_csv('./mongo-case-7/1.csv')
+        df.to_csv('./cases/1.csv')
         print(df)
-        # print(df.index.dtype)
-        # print(type(queryTimestamp))
         pos = np.where(df.index == queryTimestamp)[0][0]
         # print(pos)
         # self.__findOutliersWithZscore(
         #     df, 'serverStatus.wiredTiger.concurrentTransactions.write.out')
         # self.__findOutliersWithZscore(df, 'serverStatus.wiredTiger.concurrentTransactions.read.out')
         self.__renameCols(df)
+        self.hourlyAnalytics(df)
         to_monitor = []
+        final_to_monitor = []
+        final_str = ""
+        gpt_str_base = '''
+        Following are the anomalous metrics obtained for a server running mongodb when around the time it started facing ticket drops. Each line has metric and its percentage change separated by space. What do you infer from these metrics, instead of looking individually at each metric, select those metrics which you think are more impactful than others.
+        sm stands for system metrics
+        ss stands for server status
+        wt stands for wiredtiger
+        If the majority of these changes are negative, consider that now conditions are normal and was severe before, use it to predict what could be a root cause to these conditions in a mongo server. Analyse each metric, but report metrics of the highest impact and those that could be interrelated with each other as well. Perform any other analysis as you deem fit. Try to conclude to a list of specific possible reasons causing the issue.
+        '''
         # return
-        tbounds=self.calcBounds(df,pos,self.tdelta)
-        for delt in range(self.tdelta,10*self.tdelta+1,self.tdelta):
+        tbounds = self.calcBounds(df, pos, self.tdelta)
+        for delt in range(self.tdelta, 10*self.tdelta+1, self.tdelta):
+            gpt_str = gpt_str_base
             curr_mean, prev_mean = self.__meanCalc(df, tbounds)
             for metric in curr_mean:
                 try:
                     if self.checkMetric(curr_mean, prev_mean, metric):
                         # if True:
-                        if metric not in to_monitor:
-                            to_monitor.append(metric)
-                            print(
-                                metric, 100*(curr_mean[metric]-prev_mean[metric])/prev_mean[metric])
+                        # if metric not in to_monitor:
+                        to_monitor.append(metric)
+                        gpt_str += f"{metric} {100 * (curr_mean[metric] - prev_mean[metric]) / prev_mean[metric]}\n"
                 except Exception as e:
                     print(e, "unable to insert metric")
-            tbounds = self.calcBounds(df,pos,delt)
+            if len(to_monitor) > len(final_to_monitor):
+                final_to_monitor = to_monitor
+                final_str = gpt_str
+            to_monitor = []
+            tbounds = self.calcBounds(df, pos, delt)
+        with open("gpt-input.txt", 'w') as gptfile:
+            gptfile.write(final_str)
         self.__plot(df[tbounds['p_lb']:tbounds['c_ub']+1],
-                    to_monitor, vert_x=queryTimestamp)
+                    final_to_monitor, vert_x=queryTimestamp)
 
     def parseAll(self):
         def delta(metrList):

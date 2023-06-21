@@ -29,7 +29,7 @@ class FTDC:
         self.metric_list={}
         self.metaDocs=[]
         self.rawDataDocs=[]
-        self.tdelta=timedelta(hours=1)
+        self.tdelta=timedelta(hours=2,minutes=30)
         self.qTstamp=query_dt
 
     def read_varuint(self,buf):
@@ -116,7 +116,7 @@ class FTDC:
                 self.create_metric(res)
                 stats=reader.read(8)
                 nmetrics,ndeltas=(struct.unpack("<I", stats[0:4]),struct.unpack("<I", stats[4:8]))
-                print(nmetrics,ndeltas)
+                # print(nmetrics,ndeltas)
                 ndet_tot+=(ndeltas[0]+1)
                 nzeros=0
                 for met_idx in range(nmetrics[0]):
@@ -150,6 +150,7 @@ class FTDC:
             except Exception as e:
                 print("Failed to extract: ",e)
         print(ndet_tot)
+        # json.dump(accumulate_metrics,open("cases/debug.json",'w'),indent=1)
         tstamp=(next(iter(accumulate_metrics)))
         an_obj=FTDC_an(accumulate_metrics,self.qTstamp)
         an_obj.parseAll()
