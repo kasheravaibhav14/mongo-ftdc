@@ -91,6 +91,8 @@
         "local.oplog.rs.stats.count"
     ],
     "to_monitor_c": [
+        "serverStatus.metrics.ttl.deletedDocuments",
+        "serverStatus.metrics.ttl.passes",
         "serverStatus.asserts.regular",
         "serverStatus.asserts.msg",
         "serverStatus.asserts.warning",
@@ -521,7 +523,6 @@
         "serverStatus.metrics.repl.initialSync.completed",
         "serverStatus.metrics.repl.initialSync.failedAttempts",
         "serverStatus.metrics.repl.initialSync.failure",
-        "serverStatus.metrics.ttl.*",
         "replSetGetStatus.*",
         "local.oplog.rs.stats.wiredTiger.*",
         "local.oplog.rs.stats.start",

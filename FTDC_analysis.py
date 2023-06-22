@@ -182,10 +182,10 @@ class FTDC_an:
     def checkMetricHourly(self, curr_mean, prev_mean, met):
         if prev_mean[met] != 0 and (abs(curr_mean[met]-prev_mean[met])/prev_mean[met]) > self.threshold:
             return True
-        if met == "ss wt cache.bytes dirty in the cache cumulative" or (met.startswith("ss wt concurrentTransactions") and not met.endswith("totalTickets")):
-            return True
-        if met.startswith("ss wt txn"):
-            return True
+        # if met == "ss wt cache.bytes dirty in the cache cumulative" or (met.startswith("ss wt concurrentTransactions") and not met.endswith("totalTickets")):
+        #     return True
+        # if met.startswith("ss wt txn"):
+        #     return True
         return False
     
     def checkMetric(self, df, met):
@@ -200,8 +200,10 @@ class FTDC_an:
             # plt.legend()
             # plt.show()
             return True,len(outliers_indices)
-        # if "ss wt cache dirty fill ratio" == met:
-        #     return True, 1
+        if "ss wt cache dirty fill ratio" == met and df[met].max()>0.05:
+            return True, 1
+        if "ss wt cache fill ratio" == met and df[met].max()>0.08:
+            return True, 1
         return False,0
 
     def calcBounds(self, df, pos, delt):
@@ -309,6 +311,7 @@ class FTDC_an:
         for metric in df.columns:
             try:
                 tr,val=self.checkMetric(df.iloc[tbounds['p_lb']:tbounds['c_ub']+1], metric)
+                # tr1 = self.checkMetricHourly(curr_mean,prev_mean,metric)
                 if tr:
                     to_monitor.append(metric)
                     if prev_mean[metric]!=0:
