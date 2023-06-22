@@ -18,19 +18,19 @@ def mergePDF(outfilename):
     if not outfilename.endswith(".pdf"):
         outfilename+=".pdf"
     pdf1File = open('fig.pdf', 'rb')
-    # pdf2File = open('fig_hourly.pdf', 'rb')
+    pdf2File = open('fig_hourly.pdf', 'rb')
     pdf1Reader = PyPDF4.PdfFileReader(pdf1File)
-    # pdf2Reader = PyPDF4.PdfFileReader(pdf2File)
+    pdf2Reader = PyPDF4.PdfFileReader(pdf2File)
 
     pdfWriter = PyPDF4.PdfFileWriter()
     pdfWriter.addPage(pdf1Reader.getPage(0))  # adding the first page from pdf1
-    # pdfWriter.addPage(pdf2Reader.getPage(0))  # adding the first page from pdf2
+    pdfWriter.addPage(pdf2Reader.getPage(0))  # adding the first page from pdf2
 
     with open(outfilename,'wb') as f_out:
         pdfWriter.write(f_out)
     
     pdf1File.close()
-    # pdf2File.close()
+    pdf2File.close()
 
 
 
@@ -62,6 +62,6 @@ if __name__ == "__main__":
     print(filtered_files)
     decoder = FTDC(filtered_files,query_dt)
     decoder.process()
-    mergePDF(argv[3])
+    # mergePDF(argv[3])
     st=time.time()-st
     print("Runtime in seconds: ",st)

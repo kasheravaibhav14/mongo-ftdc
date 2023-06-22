@@ -10,7 +10,7 @@ from sklearn.ensemble import IsolationForest
 from matplotlib import pyplot as plt
 from pprint import pprint
 import sesd
-from statsmodels.tsa.stattools import grangercausalitytests
+from PyPDF4 import PdfFileReader, PdfFileWriter
 
 
 class FTDC_an:
@@ -21,8 +21,8 @@ class FTDC_an:
         self.tdelta = 150
         self.threshold = 0.25
 
-    def __plot(self, df, to_monitor, vert_x, outfilename="fig.pdf"):
-        to_monitor.sort()
+    def __plot(self, df, to_monitor, vert_x, main_title="metric-A", outfilename="fig.pdf"):
+        # to_monitor.sort()
         print("Monitoring: ", str(to_monitor))
         print(len(to_monitor))
         n_cols = 1
@@ -35,23 +35,80 @@ class FTDC_an:
             min_val = df[to_monitor[i]].min()
             mean_val = df[to_monitor[i]].mean()
             # print(max_val,min_val,mean_val)
-            if type(vert_x)==list:
+            if type(vert_x) == list:
                 for vx in vert_x:
-                    fig.add_shape(type='line', x0=vx, y0=min_val, x1=vx, y1=1.15*max_val, line=dict(width=1, dash='dot'), row=1+i//n_cols, col=1+i % n_cols)
+                    fig.add_shape(type='line', x0=vx, y0=min_val, x1=vx, y1=1.15*max_val,
+                                  line=dict(width=1, dash='dot'), row=1+i//n_cols, col=1+i % n_cols)
             else:
-                fig.add_shape(type='line', x0=vert_x, y0=min_val, x1=vert_x, y1=1.15*max_val, line=dict(width=1, dash='dot'), row=1+i//n_cols, col=1+i % n_cols)
-            fig.add_annotation(x=df.index[0], y=max_val, text=f'Max: {max_val:.2f}<br>Mean: {mean_val:.2f}',
+                fig.add_shape(type='line', x0=vert_x, y0=min_val, x1=vert_x, y1=1.15*max_val,
+                              line=dict(width=1, dash='dot'), row=1+i//n_cols, col=1+i % n_cols)
+            fig.add_annotation(x=df.index[0], y=max_val, text=f'Max: {max_val:.2f}<br>Mean: {mean_val:.2f}<br>Min:{min_val:.2f}',
                                showarrow=False,
                                font=dict(color='black', size=8),
                                row=1 + i // n_cols, col=1 + i % n_cols)
-        fig.update_layout(showlegend=False, margin=dict(
-                          l=100,
-                          r=20,  # Increase right margin to fit text
-                          b=20,
-                          t=20,
-                          pad=5))
+        fig.update_layout(title={
+            'text':main_title,
+            # 'y': 0.9,
+            'x': 0.5,
+            'xanchor': 'center',
+            'yanchor': 'top',
+            'font': dict(
+                size=10,
+                color="black",
+                family="Courier New, monospace",
+            )
+        }, showlegend=False, margin=dict(
+            l=100,
+            r=20,  # Increase right margin to fit text
+            b=20,
+            t=100,
+            pad=5))
         fig.write_image(outfilename, 'pdf', width=n_cols *
                         800, height=n_rows*125, scale=1)
+
+    def __partitionPlot(self, df, to_monitor, vert_x, outfilename="fig.pdf"):
+        def merge_pdfs(file_list, output):
+            # Create a PDF writer object
+            pdf_writer = PdfFileWriter()
+
+            # Loop through list of files
+            for file in file_list:
+                pdf_reader = PdfFileReader(file)
+                pdf_writer.addPage(pdf_reader.getPage(0))
+
+            # Write out the merged PDF
+            with open(output, 'wb') as out:
+                pdf_writer.write(out)
+        to_monitor.sort()
+        mypart = {
+            'ss_wt': [],
+            'ss_metric': [],
+            'ss': [],
+            'sm': [],
+            'etc': []
+        }
+        for met in to_monitor:
+            if "sm" in met:
+                mypart["sm"].append(met)
+                continue
+            if "ss wt" in met:
+                mypart["ss_wt"].append(met)
+            elif "ss metric" in met:
+                mypart["ss_metric"].append(met)
+            elif "ss" in met:
+                mypart["ss"].append(met)
+            else:
+                mypart["etc"].append(met)
+        ofnames = []
+
+        for key, val in mypart.items():
+            print(key, len(val))
+            if len(val) == 0:
+                continue
+            ofilename = "fig_"+key+".pdf"
+            ofnames.append(ofilename)
+            self.__plot(df, val, vert_x, key, ofilename)
+        merge_pdfs(ofnames, outfilename)
 
     def __renameCols(self, df):
         rename_cols = {}
@@ -72,8 +129,10 @@ class FTDC_an:
         curr_mean = {}
         prev_mean = {}
         for col in df.columns:
-            curr_mean[col] = df.iloc[tbounds['c_lb']:tbounds['c_ub']+1][col].mean()
-            prev_mean[col] = df.iloc[tbounds['p_lb']:tbounds['c_lb']+1][col].mean()
+            curr_mean[col] = df.iloc[tbounds['c_lb']
+                :tbounds['c_ub']+1][col].mean()
+            prev_mean[col] = df.iloc[tbounds['p_lb']
+                :tbounds['c_lb']+1][col].mean()
         return curr_mean, prev_mean
 
     def __findOutliersWithZscore(self, df, field):
@@ -123,21 +182,21 @@ class FTDC_an:
         dirty_cache = metricObj["serverStatus.wiredTiger.cache.tracked dirty bytes in the cache"]
         metricObj["ss wt cache dirty fill ratio"] = []
         for idx in range(len(total_cache)):
-            if total_cache[idx]!=0:
+            if total_cache[idx] != 0:
                 ratio = (dirty_cache[idx] / total_cache[idx])
             else:
-                ratio= 0
+                ratio = 0
             metricObj["ss wt cache dirty fill ratio"].append(ratio)
-    
+
     def __getCacheFillRatio(self, metricObj):
         total_cache = metricObj["serverStatus.wiredTiger.cache.maximum bytes configured"]
         curr_cache = metricObj["serverStatus.wiredTiger.cache.bytes currently in the cache"]
         metricObj["ss wt cache fill ratio"] = []
         for idx in range(len(total_cache)):
-            if total_cache[idx]!=0:
+            if total_cache[idx] != 0:
                 ratio = (curr_cache[idx] / total_cache[idx])
             else:
-                ratio= 0
+                ratio = 0
             metricObj["ss wt cache fill ratio"].append(ratio)
 
     def __getMemoryFragRatio(self, metricObj):
@@ -187,24 +246,28 @@ class FTDC_an:
         # if met.startswith("ss wt txn"):
         #     return True
         return False
-    
+
     def checkMetric(self, df, met):
         ts = df[met]
-        outliers_indices = sesd.generalized_esd(ts, alpha=0.05, max_anomalies=10, hybrid=False)
-        if len(outliers_indices)>0:
-            print(met, len(outliers_indices))
-            r = np.arange(len(ts))
-            # plt.plot(r, ts, label='Time series')
-            # plt.scatter(outliers_indices, ts[outliers_indices], color='r', label='Anomalies')
-            # plt.title(met)
-            # plt.legend()
-            # plt.show()
-            return True,len(outliers_indices)
-        if "ss wt cache dirty fill ratio" == met and df[met].max()>0.05:
+        try:
+            outliers_indices = sesd.generalized_esd(
+                ts, alpha=0.05, max_anomalies=10, hybrid=False)
+            if len(outliers_indices) > 0:
+                print(met, len(outliers_indices))
+                r = np.arange(len(ts))
+                # plt.plot(r, ts, label='Time series')
+                # plt.scatter(outliers_indices, ts[outliers_indices], color='r', label='Anomalies')
+                # plt.title(met)
+                # plt.legend()
+                # plt.show()
+                return True, len(outliers_indices)
+        except Exception as e:
+            print("couldn't determine for outliers")
+        if "ss wt cache dirty fill ratio" == met and df[met].max() > 0.05:
             return True, 1
-        if "ss wt cache fill ratio" == met and df[met].max()>0.08:
+        if "ss wt cache fill ratio" == met and df[met].max() > 0.08:
             return True, 1
-        return False,0
+        return False, 0
 
     def calcBounds(self, df, pos, delt):
         tbounds = {'t0': -1, 'c_ub': -1, 'c_lb': -
@@ -227,36 +290,26 @@ class FTDC_an:
                 tbounds['p_lb'] = idx
                 break
         return tbounds
-    def hourlyAnalytics(self,df):
-        to_monitor=[]
-        start=df.index[0]
-        end=min(df.index[-1],start+timedelta(hours=4))
-        curr_mean = {}
-        prev_mean = {}
-        while (start<=end):
-            nxt=start+timedelta(minutes=15)
-            if prev_mean=={}:
-                nxt1=nxt+timedelta(minutes=15)
-                for col in df.columns:
-                    curr_mean[col] = df.loc[start:nxt][col].mean()
-                    prev_mean[col] = df.loc[nxt:nxt1][col].mean()
-                start=nxt1
-            else:
-                prev_mean=curr_mean.copy()
-                for col in df.columns:
-                    curr_mean[col] = df.loc[start:nxt][col].mean()
-                start=nxt
-            # print(curr_mean)
-            for metric in curr_mean:
-                if self.checkMetricHourly(curr_mean,prev_mean,metric) and metric not in to_monitor:
-                    to_monitor.append(metric)
-        vert_x=[]
-        start=df.index[0]
-        while start<end:
-            vert_x.append(end)
-            start=start+timedelta(hours=1)
+
+    def hourlyAnalytics(self, df):
+        to_monitor = []
+        start = df.index[0]
+        end = min(df.index[-1], start+timedelta(hours=6))
+        while (start <= end):
+            nxt = start+timedelta(minutes=60)
+            for met in df.columns:
+                if met not in to_monitor:
+                    tr, v = self.checkMetric(df.loc[start:nxt], met)
+                    if tr:
+                        to_monitor.append(met)
+            start = nxt
+        vert_x = []
+        start = df.index[0]
+        while start < end:
+            start = start+timedelta(hours=1)
+            vert_x.append(start)
         print(vert_x)
-        self.__plot(df,to_monitor,vert_x,"fig_hourly.pdf")
+        self.__plot(df, to_monitor, vert_x, "hourly data", "fig_hourly.pdf")
 
     def analytics(self, metricObj, queryTimestamp):
         self.__getAverageLatencies(metricObj)
@@ -310,18 +363,19 @@ class FTDC_an:
         curr_mean, prev_mean = self.__meanCalc(df, tbounds)
         for metric in df.columns:
             try:
-                tr,val=self.checkMetric(df.iloc[tbounds['p_lb']:tbounds['c_ub']+1], metric)
+                tr, val = self.checkMetric(
+                    df.iloc[tbounds['p_lb']:tbounds['c_ub']+1], metric)
                 # tr1 = self.checkMetricHourly(curr_mean,prev_mean,metric)
                 if tr:
                     to_monitor.append(metric)
-                    if prev_mean[metric]!=0:
+                    if prev_mean[metric] != 0:
                         gpt_str += f"{metric} {(curr_mean[metric]-prev_mean[metric])/prev_mean[metric]}\n"
             except Exception as e:
                 print(e, "unable to insert metric")
         with open("gpt-input.txt", 'w') as gptfile:
             gptfile.write(gpt_str)
-        self.__plot(df[tbounds['p_lb']:tbounds['c_ub']+1],
-                    to_monitor, vert_x=queryTimestamp)
+        self.__partitionPlot(df[tbounds['p_lb']:tbounds['c_ub']+1],
+                             to_monitor, vert_x=queryTimestamp)
 
     def parseAll(self):
         def delta(metrList):
