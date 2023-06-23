@@ -60,7 +60,7 @@ if __name__ == "__main__":
 
     filtered_files.sort()
     print(filtered_files)
-    decoder = FTDC(filtered_files,query_dt)
+    decoder = FTDC(filtered_files,query_dt,argv[3])
     decoder.process()
     # mergePDF(argv[3])
     st=time.time()-st

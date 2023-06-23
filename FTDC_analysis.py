@@ -11,20 +11,26 @@ from matplotlib import pyplot as plt
 from pprint import pprint
 import sesd
 from PyPDF4 import PdfFileReader, PdfFileWriter
-
+from FTDC_plot import FTDC_plot
 
 class FTDC_an:
-    def __init__(self, metricObj, qTstamp):
+    def __init__(self, metricObj, qTstamp, outPDFpath):
         self.metricObj = metricObj
         self.queryTimeStamp = qTstamp
         self.ticketlim = 15  # when available tickets are more than 15, we assume that the system is in normal state or is heading toward crash
         self.tdelta = 150
         self.threshold = 0.25
+        self.outPDF = outPDFpath
 
     def __plot(self, df, to_monitor, vert_x, main_title="metric-A", outfilename="fig.pdf"):
-        # to_monitor.sort()
+        to_monitor.sort()
+        df1=df[to_monitor]
+        df1.to_csv('./cases/outliers.csv',index=False)
         print("Monitoring: ", str(to_monitor))
         print(len(to_monitor))
+        plot_ob = FTDC_plot(df,to_monitor,self.outPDF)
+        plot_ob.plot()
+        return
         n_cols = 1
         n_rows = int(ceil(len(to_monitor)/n_cols))
         fig = make_subplots(n_rows, n_cols, subplot_titles=to_monitor)
@@ -267,6 +273,8 @@ class FTDC_an:
             return True, 1
         if "ss wt cache fill ratio" == met and df[met].max() > 0.08:
             return True, 1
+        if "ss wt txn transaction checkpoint currently running" == met and df[met].mean()>0.4:
+            return True, 1
         return False, 0
 
     def calcBounds(self, df, pos, delt):
@@ -337,7 +345,7 @@ class FTDC_an:
         df['serverStatus.start'] = pd.to_datetime(df['serverStatus.start'])
         df.set_index('serverStatus.start', inplace=True)
         df.columns.name = 'metrics'
-        # df.to_csv('./cases/1.csv')
+        df.to_csv('./cases/1.csv')
         print(df)
         pos = np.where(df.index == queryTimestamp)[0][0]
         # self.__findOutliersWithZscore(
@@ -346,7 +354,6 @@ class FTDC_an:
         self.__renameCols(df)
         # self.hourlyAnalytics(df)
         to_monitor = []
-        final_to_monitor = []
         gpt_str_base = '''
         Following are the anomalous metrics obtained for a server running mongodb when around the time it started facing ticket drops. Each line has metric and its percentage change separated by space. What do you infer from these metrics, instead of looking individually at each metric, select those metrics which you think are more impactful than others.
         sm stands for system metrics
@@ -374,8 +381,8 @@ class FTDC_an:
                 print(e, "unable to insert metric")
         with open("gpt-input.txt", 'w') as gptfile:
             gptfile.write(gpt_str)
-        self.__partitionPlot(df[tbounds['p_lb']:tbounds['c_ub']+1],
-                             to_monitor, vert_x=queryTimestamp)
+        self.__plot(df[tbounds['p_lb']:tbounds['c_ub']+1],
+                             to_monitor,main_title="metric-A", vert_x=queryTimestamp)
 
     def parseAll(self):
         def delta(metrList):
@@ -385,9 +392,9 @@ class FTDC_an:
             return mylst
 
         def checkCriteria(met):
-            if met.startswith("serverStatus.metrics.aggStageCounters") or met.startswith("serverStatus.metrics.commands"):
-                return True
-            elif met.startswith("systemMetrics.disks") and (met.endswith("reads") or met.endswith("writes") or met.endswith("read_time_ms") or met.endswith("write_time_ms")):
+            # if met.startswith("serverStatus.metrics.aggStageCounters") or met.startswith("serverStatus.metrics.commands"):
+            #     return True
+            if met.startswith("systemMetrics.disks") and (met.endswith("reads") or met.endswith("writes") or met.endswith("read_time_ms") or met.endswith("write_time_ms")):
                 return True
             return False
 
