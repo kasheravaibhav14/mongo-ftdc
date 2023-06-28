@@ -39,8 +39,8 @@ def choose_pairs(values):
     mets = set()
     
     for val in values:
-        if val[2] in mets and val[3] in mets:
-            continue
+        # if val[2] in mets and val[3] in mets:
+        #     continue
         chosen_pairs.append([-abs(val[0]), val[2], val[3]])
         mets.add(val[2])
         mets.add(val[3])
@@ -52,30 +52,63 @@ def build_graph_and_clusters(chosen_pairs):
     for edge in chosen_pairs:
         G.add_edge(edge[1],edge[2],weight=edge[0])
     # G.add_edges_from(chosen_pairs)
-    MST = nx.minimum_spanning_tree(G)
-    clusters = list(nx.connected_components(G))
-    components = nx.connected_components(G)
+    A = nx.adjacency_matrix(G).A  # Convert adjacency matrix to numpy array
 
-    plt.figure(figsize=(20, 10))  # Set the figure size
-    plt.title('Components of the Graph')
+# Print Adjacency matrix
+    print("Adjacency Matrix:")
+    print(A)
+    D = np.diag([deg for node, deg in nx.degree(G)])
 
-    for i, component in enumerate(components):
-        # Get the sub-graph
-        subgraph = G.subgraph(component)
-        
-        # Draw the sub-graph at the ith subplot. nx.kamada_kawai_layout is used for layout
-        plt.figure()
-        nx.draw(subgraph, 
-                with_labels=True, 
-                node_color='skyblue', 
-                node_size=500, 
-                edge_color='gray', 
-                width=1,
-                edge_cmap=plt.cm.Blues, 
-                pos=nx.spring_layout(subgraph))
+# Graph Laplacian
+    L = D - A
 
-        plt.show()
+    # Eigenvalues and eigenvectors
+    vals, vecs = np.linalg.eig(L)
+    vals=vals.real
+    vecs=vecs.real
 
+    # Sort these based on the eigenvalues
+    vecs = vecs[:, np.argsort(vals)]
+    vals = vals[np.argsort(vals)]
+
+    # kmeans on first three vectors with nonzero eigenvalues
+    range_n_clusters = range(5, 15)  # Change accordingly
+
+# Variables to store results
+    elbow = []
+    delta_elbow = []  # Difference in WCSS
+
+    for n_clusters in range_n_clusters:
+        clusterer = KMeans(n_clusters=n_clusters)
+        cluster_labels = clusterer.fit_predict(vecs[:, 1:4])
+
+        # The total sum of squares
+        wcss = clusterer.inertia_
+        elbow.append(wcss)
+
+    # Calculate the difference in WCSS
+    print(elbow)
+    second_derivative = np.diff(elbow, 2)
+    # Find the optimal number of clusters
+    # The "elbow" is identified as the point where the WCSS decrease rate changes significantly
+    optimal_clusters = np.argmax(second_derivative) + 3
+
+    print(f"Optimal number of clusters: {optimal_clusters}")
+    num_clusters=optimal_clusters
+    kmeans = KMeans(n_clusters=num_clusters)
+    kmeans.fit(vecs[:, 1:num_clusters])
+    colors = kmeans.labels_
+
+    clusters = {i: [] for i in range(num_clusters)}  # Initialize empty lists for each cluster
+
+    # Fill the lists based on the assigned cluster ID for each node
+    for node_idx, cluster_id in enumerate(colors):
+        clusters[cluster_id].append(list(G.nodes())[node_idx])
+
+    # Print the clusters
+    for cluster_id, nodes in clusters.items():
+        print(f"Cluster {cluster_id}: {nodes}")
+   
     return clusters
 
 df = pd.read_csv(argv[1])
@@ -90,6 +123,7 @@ values.sort(reverse=True)
 chosen_pairs = choose_pairs(values)
 
 clusters = build_graph_and_clusters(chosen_pairs)
+exit(0)
 ctr=0
 idx = [i for i in range(len(df))]
 
