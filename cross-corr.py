@@ -2,128 +2,126 @@ import pandas as pd
 import numpy as np
 from itertools import combinations
 import networkx as nx
-from sys import argv
 import warnings
-from math import ceil
-from statsmodels.tsa.stattools import grangercausalitytests
-import matplotlib.pyplot as plt
-import plotly.express as px
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score, silhouette_samples
+from sys import argv
+import matplotlib.pyplot as plt
 
 warnings.simplefilter("ignore")
 
+
 def standardize_dataframe(df):
+    """Standardize the dataframe."""
     return (df - df.mean()) / df.std()
 
+
 def compute_cross_correlation(df, pair):
+    """Compute cross correlation for a pair of columns."""
     xcorrelation = np.correlate(df[pair[0]], df[pair[1]], 'full')
     autocorr_1 = np.correlate(df[pair[0]], df[pair[0]], 'full')
     autocorr_2 = np.correlate(df[pair[1]], df[pair[1]], 'full')
-    xcorrelation /= np.sqrt(autocorr_1[len(df[pair[0]])-1] * autocorr_2[len(df[pair[1]])-1]) # if both timeseries are of same size, it calculates to number of timeseries
+    xcorrelation /= np.sqrt(autocorr_1[len(df[pair[0]])-1] * autocorr_2[len(df[pair[1]])-1])
 
     lags = np.arange(-len(df[pair[0]]) + 1, len(df[pair[1]]))
-    maxlag_param = 150
-    indices = np.where((lags >= -maxlag_param) & (lags <= maxlag_param))
+    indices = np.where((lags >= -150) & (lags <= 150))
 
     restricted_lags = lags[indices]
     restricted_xcorrelation = xcorrelation[indices]
 
     maxlag = restricted_lags[np.argmax(restricted_xcorrelation)]
     maxval = np.max(restricted_xcorrelation)
-    if maxval<0:
-        maxval+=abs(maxlag)
-    return (maxval,-abs(maxlag),pair[0],pair[1])
+
+    return (maxval, -abs(maxlag), pair[0], pair[1])
+
 
 def choose_pairs(values):
-    chosen_pairs = []
-    mets = set()
-    
+    """Choose pairs based on their values."""
+    chosen_pairs=[]
     for val in values:
-        # if val[2] in mets and val[3] in mets:
-        #     continue
+        # if abs(val[0])>0.1:
         chosen_pairs.append([-abs(val[0]), val[2], val[3]])
-        mets.add(val[2])
-        mets.add(val[3])
-    
+    # chosen_pairs = [[-abs(val[0]), val[2], val[3]] for val in values]
     return chosen_pairs
 
-def build_graph_and_clusters(chosen_pairs):
+
+def build_graph_and_clusters(chosen_pairs,df):
+    """Build a graph from the pairs and perform clustering."""
     G = nx.Graph()
     for edge in chosen_pairs:
-        G.add_edge(edge[1],edge[2],weight=edge[0])
-    # G.add_edges_from(chosen_pairs)
-    A = nx.adjacency_matrix(G).A  # Convert adjacency matrix to numpy array
+        G.add_edge(edge[1], edge[2], weight=edge[0])
 
-# Print Adjacency matrix
-    print("Adjacency Matrix:")
-    print(A)
-    D = np.diag([deg for node, deg in nx.degree(G)])
-
-# Graph Laplacian
-    L = D - A
+    # Graph Laplacian
+    L = np.diag([deg for node, deg in nx.degree(G)]) - nx.adjacency_matrix(G).A
 
     # Eigenvalues and eigenvectors
     vals, vecs = np.linalg.eig(L)
-    vals=vals.real
-    vecs=vecs.real
+    vals, vecs = vals.real, vecs.real[:, np.argsort(vals.real)]
 
-    # Sort these based on the eigenvalues
-    vecs = vecs[:, np.argsort(vals)]
-    vals = vals[np.argsort(vals)]
+    range_n_clusters = range(5, 25)  # Change accordingly
 
-    # kmeans on first three vectors with nonzero eigenvalues
-    range_n_clusters = range(5, 15)  # Change accordingly
-
-# Variables to store results
-    elbow = []
-    delta_elbow = []  # Difference in WCSS
-
+    elbow, silhouette_avg = [], []
     for n_clusters in range_n_clusters:
-        clusterer = KMeans(n_clusters=n_clusters)
+        clusterer = KMeans(n_clusters=n_clusters,random_state=0, n_init=25)
         cluster_labels = clusterer.fit_predict(vecs[:, 1:n_clusters])
 
-        # The total sum of squares
-        wcss = clusterer.inertia_
-        elbow.append(wcss)
+        elbow.append(clusterer.inertia_)
+        av_silhouette=silhouette_score(vecs[:, 1:n_clusters], cluster_labels)
+        # print(av_silhouette)
+        silhouette_avg.append(av_silhouette)
+        # sample_silhouette_values = silhouette_samples(vecs[:, 1:n_clusters], cluster_labels)
+        # for i in (cluster_labels):
+        # Aggregate the silhouette scores for samples belonging to cluster i, and sort them
+            # ith_cluster_silhouette_values = \
+            #     sample_silhouette_values[cluster_labels == i]
 
-    # Calculate the difference in WCSS
-    print(elbow)
-    second_derivative = np.diff(elbow, 2)
-    # Find the optimal number of clusters
-    # The "elbow" is identified as the point where the WCSS decrease rate changes significantly
-    optimal_clusters = np.argmax(second_derivative) + 3
+            # ith_cluster_silhouette_values.sort()
+            # if ith_cluster_silhouette_values[-1]<av_silhouette:
+            #     print(ith_cluster_silhouette_values)
+            #     print(n_clusters,"False")
+            #     break
+        # print(sample_silhouette_values)
+
+    optimal_clusters = np.where(np.diff(elbow) == max(np.diff(elbow)))[0][0] + 5
+    optimal_k_silhouette = silhouette_avg.index(max(silhouette_avg)) + 5
 
     print(f"Optimal number of clusters: {optimal_clusters}")
-    num_clusters=optimal_clusters
-    kmeans = KMeans(n_clusters=num_clusters)
+    print(f'The optimal number of clusters according to the silhouette method is {optimal_k_silhouette}')
+
+    num_clusters = optimal_clusters
+    kmeans = KMeans(n_clusters=num_clusters, random_state=0, n_init=20)
     kmeans.fit(vecs[:, 1:num_clusters])
-    colors = kmeans.labels_
 
-    clusters = {i: [] for i in range(num_clusters)}  # Initialize empty lists for each cluster
-
-    # Fill the lists based on the assigned cluster ID for each node
-    for node_idx, cluster_id in enumerate(colors):
+    clusters = {i: [] for i in range(num_clusters)}
+    for node_idx, cluster_id in enumerate(kmeans.labels_):
         clusters[cluster_id].append(list(G.nodes())[node_idx])
 
-    # Print the clusters
     for cluster_id, nodes in clusters.items():
-        print(f"Cluster {cluster_id}: {nodes}")
-   
+        print(f"Cluster {cluster_id}: {nodes}\n {len(nodes)}")
+        nr=max(2,len(nodes))
+        fig,ax = plt.subplots(nrows=nr,figsize=(20,10))
+        idx=[i for i in range(len(df))]
+        for ix in range(len(nodes)):
+            ax[ix].plot(idx,df[nodes[ix]].values)
+            ax[ix].set_title(nodes[ix],fontsize=5)
+        plt.show()
+        # H=G.subgraph(nodes)
+        # nx.draw(H, with_labels=True)
+        # plt.show()
     return clusters
 
-df = pd.read_csv(argv[1])
-df1 = pd.read_csv(argv[1])
-df = standardize_dataframe(df)
 
-column_pairs = list(map(tuple, combinations(df.columns, 2)))
+if __name__ == "__main__":
+    df = pd.read_csv(argv[1])
+    df1 = pd.read_csv(argv[1])
+    df = standardize_dataframe(df)
+    column_pairs = list(map(tuple, combinations(df.columns, 2)))
+    values = [compute_cross_correlation(df, pair) for pair in column_pairs]
+    values.sort(reverse=True)
+    chosen_pairs = choose_pairs(values)
+    clusters = build_graph_and_clusters(chosen_pairs,df1)
 
-values = [compute_cross_correlation(df, pair) for pair in column_pairs]
-values.sort(reverse=True)
 
-chosen_pairs = choose_pairs(values)
-
-clusters = build_graph_and_clusters(chosen_pairs)
 exit(0)
 ctr=0
 idx = [i for i in range(len(df))]
