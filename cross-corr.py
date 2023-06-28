@@ -9,6 +9,7 @@ from statsmodels.tsa.stattools import grangercausalitytests
 import matplotlib.pyplot as plt
 import plotly.express as px
 from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score, silhouette_samples
 
 warnings.simplefilter("ignore")
 
@@ -80,7 +81,7 @@ def build_graph_and_clusters(chosen_pairs):
 
     for n_clusters in range_n_clusters:
         clusterer = KMeans(n_clusters=n_clusters)
-        cluster_labels = clusterer.fit_predict(vecs[:, 1:4])
+        cluster_labels = clusterer.fit_predict(vecs[:, 1:n_clusters])
 
         # The total sum of squares
         wcss = clusterer.inertia_
