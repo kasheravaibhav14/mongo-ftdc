@@ -13,20 +13,47 @@ import sesd
 from PyPDF4 import PdfFileReader, PdfFileWriter
 from FTDC_plot import FTDC_plot
 
+def checkMetric(df, met):
+    ts = df[met]
+    anom_count=15
+    if  ts.max()>=1.25*ts.mean() and ts.mean()!=0:
+        try:
+            outliers_indices = sesd.seasonal_esd(
+                ts, alpha=0.05, max_anomalies=anom_count, hybrid=True)
+            if len(outliers_indices) > 0:
+                return True, len(outliers_indices)
+        except Exception as e:
+            print(met,"couldn't determine for outliers")
+    meanval=df[met].mean()
+    maxval=df[met].max()
+    if "ss wt cache dirty fill ratio" == met:
+        print(met,maxval)
+        if maxval >= 5:
+            return True, 1
+    if "ss wt cache fill ratio" == met:
+        print(met,maxval)
+        if maxval >= 75:
+            return True, 1
+    if "ss wt txn transaction checkpoint currently running" == met and meanval>0.20:
+        return True, 1
+    return False, 0
+
 class FTDC_an:
-    def __init__(self, metricObj, qTstamp, outPDFpath):
+    def __init__(self, metricObj, qTstamp, outPDFpath,duration):
         self.metricObj = metricObj
         self.queryTimeStamp = qTstamp
         self.ticketlim = 15  # when available tickets are more than 15, we assume that the system is in normal state or is heading toward crash
-        self.tdelta = 150
+        self.tdelta = duration
         self.threshold = 0.25
         self.outPDF = outPDFpath
 
     def __plot(self, df, to_monitor, vert_x, main_title="metric-A", outfilename="fig.pdf"):
         to_monitor.sort()
         df1=df[to_monitor]
-        df1.to_csv('./cases/outliers.csv',index=False)
-        print("Monitoring: ", str(to_monitor))
+        end_index = self.outPDF.rindex("/")
+        outlierPath = self.outPDF[:end_index]+'/outliers.csv'
+        df1.to_csv(outlierPath,index=False)
+        # print("Monitoring: ", str(to_monitor))
         print(len(to_monitor))
         plot_ob = FTDC_plot(df,to_monitor,self.outPDF)
         plot_ob.plot()
@@ -192,20 +219,22 @@ class FTDC_an:
                 ratio = (dirty_cache[idx] / total_cache[idx])
             else:
                 ratio = 0
-            metricObj["ss wt cache dirty fill ratio"].append(ratio)
+            metricObj["ss wt cache dirty fill ratio"].append(100*ratio)
 
     def __getCacheFillRatio(self, metricObj):
         total_cache = metricObj["serverStatus.wiredTiger.cache.maximum bytes configured"]
         curr_cache = metricObj["serverStatus.wiredTiger.cache.bytes currently in the cache"]
         metricObj["ss wt cache fill ratio"] = []
+        
         for idx in range(len(total_cache)):
             if total_cache[idx] != 0:
                 ratio = (curr_cache[idx] / total_cache[idx])
             else:
                 ratio = 0
-            metricObj["ss wt cache fill ratio"].append(ratio)
+            metricObj["ss wt cache fill ratio"].append(100*ratio)
 
     def __getMemoryFragRatio(self, metricObj):
+
         tCache = "serverStatus.tcmalloc.generic.current_allocated_bytes"
         trCache = "serverStatus.tcmalloc.generic.heap_size"
         nkey = "serverStatus.wiredTiger.memory fragmentation ratio"
@@ -213,9 +242,9 @@ class FTDC_an:
             return
         metricObj[nkey] = []
         for idx in range(len(metricObj[trCache])):
-            if metricObj[tCache][idx] != 0:
+            if metricObj[trCache][idx] != 0:
                 metricObj[nkey].append(
-                    100*(metricObj[trCache][idx]/metricObj[tCache][idx]))
+                    100*((metricObj[trCache][idx]-metricObj[tCache][idx])/metricObj[trCache][idx]))
             else:
                 metricObj[nkey].append(-1)
 
@@ -229,6 +258,28 @@ class FTDC_an:
                     if metricObj[opkey][idx] != 0:
                         metricObj[ltkey][idx] = metricObj[ltkey][idx] / \
                             metricObj[opkey][idx]
+    def __diskUtilization(self,metricObj):
+        disks=[]
+        for key in metricObj:
+            if key.startswith("systemMetrics.disks"):
+                print(key)
+                mystr=key
+                disk=mystr.split("systemMetrics.disks.")[1].split('.')[0]
+                if disk not in disks:
+                    disks.append(disk)
+        
+        for disk in disks:
+            io="systemMetrics.disks."+disk+".io_time_ms"
+            queue="systemMetrics.disks."+disk+".io_queued_ms"
+            newkey="systemMetrics.disks."+disk+" utilization"
+            if io not in metricObj or queue not in metricObj:
+                continue
+            metricObj[newkey]=[]
+            for idx in range(len(metricObj[io])):
+                if metricObj[io][idx]==0:
+                    metricObj[newkey].append(0)
+                else:
+                    metricObj[newkey].append((100*metricObj[io][idx])/(metricObj[io][idx]+metricObj[queue][idx]))
 
     def __tcmallocminuswt(self, metricObj):
         wtcache = "serverStatus.wiredTiger.cache.bytes currently in the cache"
@@ -242,7 +293,7 @@ class FTDC_an:
         metricObj[newkey] = []
         for idx in range(len(metricObj[wtcache])):
             metricObj[newkey].append(
-                (metricObj[tcmalloc][idx]-metricObj[wtcache][idx])/(mib_conv))
+                (metricObj[tcmalloc][idx]-metricObj[wtcache][idx])/mib_conv)
 
     def checkMetricHourly(self, curr_mean, prev_mean, met):
         if prev_mean[met] != 0 and (abs(curr_mean[met]-prev_mean[met])/prev_mean[met]) > self.threshold:
@@ -253,29 +304,7 @@ class FTDC_an:
         #     return True
         return False
 
-    def checkMetric(self, df, met):
-        ts = df[met]
-        try:
-            outliers_indices = sesd.generalized_esd(
-                ts, alpha=0.05, max_anomalies=10, hybrid=False)
-            if len(outliers_indices) > 0:
-                print(met, len(outliers_indices))
-                r = np.arange(len(ts))
-                # plt.plot(r, ts, label='Time series')
-                # plt.scatter(outliers_indices, ts[outliers_indices], color='r', label='Anomalies')
-                # plt.title(met)
-                # plt.legend()
-                # plt.show()
-                return True, len(outliers_indices)
-        except Exception as e:
-            print("couldn't determine for outliers")
-        if "ss wt cache dirty fill ratio" == met and df[met].max() > 0.05:
-            return True, 1
-        if "ss wt cache fill ratio" == met and df[met].max() > 0.08:
-            return True, 1
-        if "ss wt txn transaction checkpoint currently running" == met and df[met].mean()>0.4:
-            return True, 1
-        return False, 0
+    
 
     def calcBounds(self, df, pos, delt):
         tbounds = {'t0': -1, 'c_ub': -1, 'c_lb': -
@@ -307,7 +336,7 @@ class FTDC_an:
             nxt = start+timedelta(minutes=60)
             for met in df.columns:
                 if met not in to_monitor:
-                    tr, v = self.checkMetric(df.loc[start:nxt], met)
+                    tr, v = checkMetric(df.loc[start:nxt], met)
                     if tr:
                         to_monitor.append(met)
             start = nxt
@@ -325,6 +354,7 @@ class FTDC_an:
         self.__getMemoryFragRatio(metricObj)
         self.__getDirtyFillRatio(metricObj)
         self.__getCacheFillRatio(metricObj)
+        self.__diskUtilization(metricObj)
         un_len = {}  # debug
         for key in metricObj:
             if len(metricObj[key]) not in un_len:
@@ -369,16 +399,18 @@ class FTDC_an:
         gpt_str = gpt_str_base
         curr_mean, prev_mean = self.__meanCalc(df, tbounds)
         for metric in df.columns:
+            
             try:
-                tr, val = self.checkMetric(
+                tr, val = checkMetric(
                     df.iloc[tbounds['p_lb']:tbounds['c_ub']+1], metric)
                 # tr1 = self.checkMetricHourly(curr_mean,prev_mean,metric)
                 if tr:
+                    print(metric,"done")
                     to_monitor.append(metric)
                     if prev_mean[metric] != 0:
                         gpt_str += f"{metric} {(curr_mean[metric]-prev_mean[metric])/prev_mean[metric]}\n"
             except Exception as e:
-                print(e, "unable to insert metric")
+                print(e, "unable to insert metric",metric)
         with open("gpt-input.txt", 'w') as gptfile:
             gptfile.write(gpt_str)
         self.__plot(df[tbounds['p_lb']:tbounds['c_ub']+1],
@@ -394,7 +426,7 @@ class FTDC_an:
         def checkCriteria(met):
             # if met.startswith("serverStatus.metrics.aggStageCounters") or met.startswith("serverStatus.metrics.commands"):
             #     return True
-            if met.startswith("systemMetrics.disks") and (met.endswith("reads") or met.endswith("writes") or met.endswith("read_time_ms") or met.endswith("write_time_ms")):
+            if met.startswith("systemMetrics.disks"):
                 return True
             return False
 
