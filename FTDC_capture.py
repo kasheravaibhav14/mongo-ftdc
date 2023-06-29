@@ -36,8 +36,8 @@ def mergePDF(outfilename):
 
 if __name__ == "__main__":
     st=time.time()
-    if(len(argv)!=4):
-        print("use python3 <FTDC_capture.py> <diagnostic.data> <qTstamp> <outfilename>")
+    if(len(argv)<4):
+        print("use python3 <FTDC_capture.py> <diagnostic.data> <qTstamp> <outfilename> <duration in mins>")
         exit(1)
     dirPath=pathlib.Path(argv[1])
     if not dirPath.is_dir():
@@ -54,14 +54,17 @@ if __name__ == "__main__":
             # print(file.name)
             tstamp=convert_to_datetime(file.name[file.name.index('.')+1:])
             diff=abs(tstamp-query_dt)
-            if diff <= timedelta(hours=5):
+            if diff <= timedelta(hours=6):
                 # print(diff)
                 filtered_files.append(file)
 
     filtered_files.sort()
     print(filtered_files)
-    decoder = FTDC(filtered_files,query_dt,argv[3])
+    if len(argv)==5:
+        duration=int(float(argv[4])*60)
+        decoder = FTDC(filtered_files,query_dt,argv[3],duration)
+    else:
+        decoder = FTDC(filtered_files,query_dt,argv[3])
     decoder.process()
-    # mergePDF(argv[3])
     st=time.time()-st
     print("Runtime in seconds: ",st)

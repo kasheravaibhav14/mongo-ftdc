@@ -22,7 +22,7 @@ def int64(uint64_value):
 
 
 class FTDC:
-    def __init__(self, metric_path,query_dt, outpath=''):
+    def __init__(self, metric_path,query_dt, outpath='',duration=600):
         self.fpath=metric_path
         self.metric_names=[]
         self.prev_metric_list=[]
@@ -32,6 +32,7 @@ class FTDC:
         self.tdelta=timedelta(hours=2,minutes=30)
         self.qTstamp=query_dt
         self.outpath=outpath
+        self.duration=duration//4
 
     def read_varuint(self,buf):
         value = 0
@@ -153,7 +154,7 @@ class FTDC:
         print(ndet_tot)
         # json.dump(accumulate_metrics,open("cases/debug.json",'w'),indent=1)
         tstamp=(next(iter(accumulate_metrics)))
-        an_obj=FTDC_an(accumulate_metrics,self.qTstamp,self.outpath)
+        an_obj=FTDC_an(accumulate_metrics,self.qTstamp,self.outpath,self.duration)
         an_obj.parseAll()
 
     # @profile

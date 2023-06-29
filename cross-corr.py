@@ -3,7 +3,7 @@ import numpy as np
 from itertools import combinations
 import networkx as nx
 import warnings
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, SpectralClustering
 from sklearn.metrics import silhouette_score, silhouette_samples
 from sys import argv
 import matplotlib.pyplot as plt
@@ -56,58 +56,22 @@ def build_graph_and_clusters(chosen_pairs,df):
 
     # Eigenvalues and eigenvectors
     vals, vecs = np.linalg.eig(L)
-    vals, vecs = vals.real, vecs.real[:, np.argsort(vals.real)]
+    # vals, vecs = vals.real, vecs.real[:, np.argsort(vals.real)]
 
-    range_n_clusters = range(5, 25)  # Change accordingly
+    # Spectral Clustering on first three vectors with nonzero eigenvalues
+    clustering = SpectralClustering(n_clusters=4, affinity='precomputed', assign_labels='discretize')
+    clustering.fit(vecs[:, 1:4])
+    colors = clustering.labels_
 
-    elbow, silhouette_avg = [], []
-    for n_clusters in range_n_clusters:
-        clusterer = KMeans(n_clusters=n_clusters,random_state=0, n_init=25)
-        cluster_labels = clusterer.fit_predict(vecs[:, 1:n_clusters])
+    clusters = {i: [] for i in range(4)}  # Initialize empty lists for each cluster
 
-        elbow.append(clusterer.inertia_)
-        av_silhouette=silhouette_score(vecs[:, 1:n_clusters], cluster_labels)
-        # print(av_silhouette)
-        silhouette_avg.append(av_silhouette)
-        # sample_silhouette_values = silhouette_samples(vecs[:, 1:n_clusters], cluster_labels)
-        # for i in (cluster_labels):
-        # Aggregate the silhouette scores for samples belonging to cluster i, and sort them
-            # ith_cluster_silhouette_values = \
-            #     sample_silhouette_values[cluster_labels == i]
-
-            # ith_cluster_silhouette_values.sort()
-            # if ith_cluster_silhouette_values[-1]<av_silhouette:
-            #     print(ith_cluster_silhouette_values)
-            #     print(n_clusters,"False")
-            #     break
-        # print(sample_silhouette_values)
-
-    optimal_clusters = np.where(np.diff(elbow) == max(np.diff(elbow)))[0][0] + 5
-    optimal_k_silhouette = silhouette_avg.index(max(silhouette_avg)) + 5
-
-    print(f"Optimal number of clusters: {optimal_clusters}")
-    print(f'The optimal number of clusters according to the silhouette method is {optimal_k_silhouette}')
-
-    num_clusters = optimal_clusters
-    kmeans = KMeans(n_clusters=num_clusters, random_state=0, n_init=20)
-    kmeans.fit(vecs[:, 1:num_clusters])
-
-    clusters = {i: [] for i in range(num_clusters)}
-    for node_idx, cluster_id in enumerate(kmeans.labels_):
+    # Fill the lists based on the assigned cluster ID for each node
+    for node_idx, cluster_id in enumerate(colors):
         clusters[cluster_id].append(list(G.nodes())[node_idx])
 
+    # Print the clusters
     for cluster_id, nodes in clusters.items():
-        print(f"Cluster {cluster_id}: {nodes}\n {len(nodes)}")
-        nr=max(2,len(nodes))
-        fig,ax = plt.subplots(nrows=nr,figsize=(20,10))
-        idx=[i for i in range(len(df))]
-        for ix in range(len(nodes)):
-            ax[ix].plot(idx,df[nodes[ix]].values)
-            ax[ix].set_title(nodes[ix],fontsize=5)
-        plt.show()
-        # H=G.subgraph(nodes)
-        # nx.draw(H, with_labels=True)
-        # plt.show()
+        print(f"Cluster {cluster_id}: {nodes}")
     return clusters
 
 

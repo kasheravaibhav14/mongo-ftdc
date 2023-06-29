@@ -6,6 +6,7 @@ from reportlab.graphics import renderPDF
 from reportlab.platypus import Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
 import numpy as np
+import matplotlib.ticker as mtick
 import pandas as pd
 import os
 import plotly.graph_objects as go
@@ -23,8 +24,8 @@ class FTDC_plot:
         # plt.cm.get_cmap('magma')
         plt.style.use('ggplot')
         # Define column widths
-        total_parts = 1 + 1 + 6 + 3
-        column_widths = [page_width / total_parts * i for i in [1, 1, 6, 3]]
+        total_parts = 2 + 2 + 7 + 4
+        column_widths = [page_width / total_parts * i for i in [2, 2, 7, 4]]
 
         # Define image dimensions
         image_width = column_widths[2]
@@ -61,14 +62,20 @@ class FTDC_plot:
             minval=self.df[self.to_monitor[i]].min()
             meanval=self.df[self.to_monitor[i]].mean()
             maxval=self.df[self.to_monitor[i]].max()
+            if "concurrent" in self.to_monitor[i]:
+                print(self.to_monitor[i],minval,meanval,maxval)
 
             # Create a plot
             fig, ax = plt.subplots(figsize=(image_width / 100, image_height / 100))
             ax.plot(x, y, linewidth=0.5)
             if current_y - 2*space_per_pair <0 or i==len(self.to_monitor)-1:
-                ax.set_xlabel('Timestamp') # print the y label only when it is last plot of page
-            ax.set_yticks([])
-            ax.set_yticks([])
+                ax.set_xlabel('Timestamp',fontsize=8) # print the y label only when it is last plot of page
+            # ax.set_xticks([])
+            # ax.set_yticks([])
+            plt.yticks(fontsize=5,fontname='Helvetica')
+            plt.xticks(fontsize=5)
+            fmt = mtick.StrMethodFormatter('{x:0.2e}')
+            ax.yaxis.set_major_formatter(fmt)
             inc = (maxval-minval)*0.1
             ax.set_ylim(minval-inc,maxval+inc)
             # # ax.set_ylabel('y')
@@ -91,8 +98,8 @@ class FTDC_plot:
             renderPDF.draw(drawing, c, sum(column_widths[:2]), current_y)
 
             # Add the corresponding text to the PDF
-            text_before1 = f"<font size=8>{meanval:.2f}</font>"
-            text_before2 = f"<font size=8>{maxval:.2f}</font>"
+            text_before1 = f"<font size=8>{meanval:,.3f}</font>"
+            text_before2 = f"<font size=8>{maxval:,.3f}</font>"
             # text_before2 = f"<font size=12>Before 2 plot {i+1}.</font>"
             text_after = f"<font size=10>{self.to_monitor[i]}.</font>"
 

@@ -12,10 +12,10 @@ from pprint import pprint
 import sesd
 from PyPDF4 import PdfFileReader, PdfFileWriter
 from FTDC_plot import FTDC_plot
-
+import multiprocessing as mp
 def checkMetric(df, met):
     ts = df[met]
-    anom_count=15
+    anom_count=30
     if  ts.max()>=1.25*ts.mean() and ts.mean()!=0:
         try:
             outliers_indices = sesd.seasonal_esd(
@@ -36,8 +36,17 @@ def checkMetric(df, met):
             return True, 1
     if "ss wt txn transaction checkpoint currently running" == met and meanval>0.20:
         return True, 1
+    # if "ss wt concurrentTransactions.write.available" == met or "ss wt concurrentTransactions.read.available" == met:
+    #     return True,1
     return False, 0
-
+def checkMetric_wrapper(args):
+    df, met = args
+    tr, val = checkMetric(df, met)
+    if tr:
+        print(met, "done")
+        return val, met
+    else:
+        return val, None
 class FTDC_an:
     def __init__(self, metricObj, qTstamp, outPDFpath,duration):
         self.metricObj = metricObj
@@ -367,8 +376,8 @@ class FTDC_an:
         wstr = ''
         for col in df.columns:
             wstr = wstr+col+'\n'
-        # with open('metricList','w') as filew:
-        #     filew.write(wstr)
+        with open('metricList','w') as filew:
+            filew.write(wstr)
         print(df)
         df['serverStatus.start'] = df['serverStatus.start'].apply(
             self.getDTFromSecs)
@@ -396,23 +405,27 @@ class FTDC_an:
         print(df.index[pos])
         for ky in tbounds:
             print(ky, df.index[tbounds[ky]])
-        gpt_str = gpt_str_base
-        curr_mean, prev_mean = self.__meanCalc(df, tbounds)
-        for metric in df.columns:
+        # gpt_str = gpt_str_base
+        # curr_mean, prev_mean = self.__meanCalc(df, tbounds)
+        pool = mp.Pool(6)  # create a multiprocessing Pool
+        # prepare the arguments for the worker function
+        args = [(df.iloc[tbounds['p_lb']:tbounds['c_ub']+1], metric) for metric in df.columns]
+        results = pool.map(checkMetric_wrapper, args)  # process the list using pool of workers
+        # get the metrics for which checkMetric returned True
+        to_monitor = [result[1] for result in results if result[1] is not None]
+        pool.close()
+        print(to_monitor)
+        results.sort(reverse=True)
+        for x in results:
+            if x[1] is not None:
+                print(x)
+
+        # for metric in df.columns:
             
-            try:
-                tr, val = checkMetric(
-                    df.iloc[tbounds['p_lb']:tbounds['c_ub']+1], metric)
-                # tr1 = self.checkMetricHourly(curr_mean,prev_mean,metric)
-                if tr:
-                    print(metric,"done")
-                    to_monitor.append(metric)
-                    if prev_mean[metric] != 0:
-                        gpt_str += f"{metric} {(curr_mean[metric]-prev_mean[metric])/prev_mean[metric]}\n"
-            except Exception as e:
-                print(e, "unable to insert metric",metric)
-        with open("gpt-input.txt", 'w') as gptfile:
-            gptfile.write(gpt_str)
+        #     try:
+        #         tr, val = checkMetric(
+        #             df.iloc[tbounds['p_lb']:tbounds['c_ub']+1], metric)
+        
         self.__plot(df[tbounds['p_lb']:tbounds['c_ub']+1],
                              to_monitor,main_title="metric-A", vert_x=queryTimestamp)
 
