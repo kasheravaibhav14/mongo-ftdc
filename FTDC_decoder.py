@@ -32,7 +32,7 @@ class FTDC:
         self.tdelta=timedelta(hours=2,minutes=30)
         self.qTstamp=query_dt
         self.outpath=outpath
-        self.duration=duration//4
+        self.duration=duration
 
     def read_varuint(self,buf):
         value = 0

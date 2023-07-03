@@ -12,12 +12,32 @@ import os
 import plotly.graph_objects as go
 
 class FTDC_plot:
-    def __init__(self, df, to_monitor,outfilepath="report.pdf"):
+    def __init__(self, df, to_monitor,vert_x,outfilepath="report.pdf"):
         self.df = df
         self.to_monitor = to_monitor
         self.outPath = outfilepath
+        self.vert_x = vert_x
+        self.subheadings = ["ss","ss metrics", "sm", "ss tcmalloc"]
+        self.expandedSub = {"ss":"serverStatus", "ss metrics":"metrics", "sm":"systemMetrics", "ss tcmalloc": "tcmalloc"}
+    
+    def custom_sort(self,arr):
+        def compare_strings(s):
+            if s.startswith("ss wt concurrentTransactions."):
+                return (0, s)
+            elif s.startswith("ss wt cache"):
+                return (1, s)
+            elif s.startswith("ss wt"):
+                return (2, s)
+            elif s.startswith("ss"):
+                return (3, s)
+            else:
+                return (4, s)
+
+        arr.sort(key=compare_strings)
     
     def plot(self):
+        self.custom_sort(self.to_monitor)
+        seen_subheadings=set()
         # Prepare the canvas
         c = canvas.Canvas(self.outPath, pagesize=A3)
         page_width, page_height = A3
@@ -51,23 +71,33 @@ class FTDC_plot:
         
         draw_headers()
         for i in range(len(self.to_monitor)):
+
             # If we don't have enough space for the next pair, create a new page
             if current_y - space_per_pair < 0:
                 c.showPage()
                 current_y = page_height - image_height - header_height - padding
                 draw_headers()  # Draw headers at the start of each new page
-            # Generate random data
+
+            for subheading in self.subheadings:
+                if self.to_monitor[i].startswith(subheading) and subheading not in seen_subheadings:
+                    seen_subheadings.add(subheading)  # Remember that we've seen this subheading
+                    # Add the subheading to the PDF
+                    text_subheading = f"<font size=10><i>{self.expandedSub[subheading]}</i></font>"
+                    P = Paragraph(text_subheading)
+                    P.wrapOn(c, page_width, 500)
+                    current_y -= 1 * space_per_pair  # Leave some space after the subheading
+                    P.drawOn(c, 25, current_y + 1.5 * space_per_pair)  # Adjust the position as needed
+                    break  # Stop checking other subheadings
             x = self.df.index
             y = self.df[self.to_monitor[i]]
             minval=self.df[self.to_monitor[i]].min()
             meanval=self.df[self.to_monitor[i]].mean()
             maxval=self.df[self.to_monitor[i]].max()
-            if "concurrent" in self.to_monitor[i]:
-                print(self.to_monitor[i],minval,meanval,maxval)
 
             # Create a plot
             fig, ax = plt.subplots(figsize=(image_width / 100, image_height / 100))
             ax.plot(x, y, linewidth=0.5)
+            ax.axvline(x=self.vert_x, color='b', linestyle='--', linewidth=0.5)
             if current_y - 2*space_per_pair <0 or i==len(self.to_monitor)-1:
                 ax.set_xlabel('Timestamp',fontsize=8) # print the y label only when it is last plot of page
             # ax.set_xticks([])

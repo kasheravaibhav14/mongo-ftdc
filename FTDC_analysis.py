@@ -1,112 +1,37 @@
 import json
-import os
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
-from plotly.subplots import make_subplots
-import plotly.graph_objects as go
-from math import ceil
 from sklearn.ensemble import IsolationForest
 from matplotlib import pyplot as plt
 from pprint import pprint
-import sesd
 from PyPDF4 import PdfFileReader, PdfFileWriter
 from FTDC_plot import FTDC_plot
 import multiprocessing as mp
-def checkMetric(df, met):
-    ts = df[met]
-    anom_count=30
-    if  ts.max()>=1.25*ts.mean() and ts.mean()!=0:
-        try:
-            outliers_indices = sesd.seasonal_esd(
-                ts, alpha=0.05, max_anomalies=anom_count, hybrid=True)
-            if len(outliers_indices) > 0:
-                return True, len(outliers_indices)
-        except Exception as e:
-            print(met,"couldn't determine for outliers")
-    meanval=df[met].mean()
-    maxval=df[met].max()
-    if "ss wt cache dirty fill ratio" == met:
-        print(met,maxval)
-        if maxval >= 5:
-            return True, 1
-    if "ss wt cache fill ratio" == met:
-        print(met,maxval)
-        if maxval >= 75:
-            return True, 1
-    if "ss wt txn transaction checkpoint currently running" == met and meanval>0.20:
-        return True, 1
-    # if "ss wt concurrentTransactions.write.available" == met or "ss wt concurrentTransactions.read.available" == met:
-    #     return True,1
-    return False, 0
-def checkMetric_wrapper(args):
-    df, met = args
-    tr, val = checkMetric(df, met)
-    if tr:
-        print(met, "done")
-        return val, met
-    else:
-        return val, None
+from scipy.stats import zscore
+
+
 class FTDC_an:
     def __init__(self, metricObj, qTstamp, outPDFpath,duration):
         self.metricObj = metricObj
         self.queryTimeStamp = qTstamp
-        self.ticketlim = 15  # when available tickets are more than 15, we assume that the system is in normal state or is heading toward crash
+        self.ticketlim = 50  # when available tickets are more than 15, we assume that the system is in normal state or is heading toward crash
         self.tdelta = duration
         self.threshold = 0.25
         self.outPDF = outPDFpath
+        self.nbuckets = 5
 
     def __plot(self, df, to_monitor, vert_x, main_title="metric-A", outfilename="fig.pdf"):
         to_monitor.sort()
         df1=df[to_monitor]
         end_index = self.outPDF.rindex("/")
         outlierPath = self.outPDF[:end_index]+'/outliers.csv'
-        df1.to_csv(outlierPath,index=False)
+        df.to_csv(outlierPath,index=True)
         # print("Monitoring: ", str(to_monitor))
         print(len(to_monitor))
-        plot_ob = FTDC_plot(df,to_monitor,self.outPDF)
+        plot_ob = FTDC_plot(df,to_monitor,vert_x,self.outPDF)
         plot_ob.plot()
         return
-        n_cols = 1
-        n_rows = int(ceil(len(to_monitor)/n_cols))
-        fig = make_subplots(n_rows, n_cols, subplot_titles=to_monitor)
-        for i in range(len(to_monitor)):
-            fig.add_trace(go.Scatter(
-                x=df.index, y=df[to_monitor[i]]), 1+i//n_cols, 1+i % n_cols)
-            max_val = df[to_monitor[i]].max()
-            min_val = df[to_monitor[i]].min()
-            mean_val = df[to_monitor[i]].mean()
-            # print(max_val,min_val,mean_val)
-            if type(vert_x) == list:
-                for vx in vert_x:
-                    fig.add_shape(type='line', x0=vx, y0=min_val, x1=vx, y1=1.15*max_val,
-                                  line=dict(width=1, dash='dot'), row=1+i//n_cols, col=1+i % n_cols)
-            else:
-                fig.add_shape(type='line', x0=vert_x, y0=min_val, x1=vert_x, y1=1.15*max_val,
-                              line=dict(width=1, dash='dot'), row=1+i//n_cols, col=1+i % n_cols)
-            fig.add_annotation(x=df.index[0], y=max_val, text=f'Max: {max_val:.2f}<br>Mean: {mean_val:.2f}<br>Min:{min_val:.2f}',
-                               showarrow=False,
-                               font=dict(color='black', size=8),
-                               row=1 + i // n_cols, col=1 + i % n_cols)
-        fig.update_layout(title={
-            'text':main_title,
-            # 'y': 0.9,
-            'x': 0.5,
-            'xanchor': 'center',
-            'yanchor': 'top',
-            'font': dict(
-                size=10,
-                color="black",
-                family="Courier New, monospace",
-            )
-        }, showlegend=False, margin=dict(
-            l=100,
-            r=20,  # Increase right margin to fit text
-            b=20,
-            t=100,
-            pad=5))
-        fig.write_image(outfilename, 'pdf', width=n_cols *
-                        800, height=n_rows*125, scale=1)
 
     def __partitionPlot(self, df, to_monitor, vert_x, outfilename="fig.pdf"):
         def merge_pdfs(file_list, output):
@@ -304,58 +229,114 @@ class FTDC_an:
             metricObj[newkey].append(
                 (metricObj[tcmalloc][idx]-metricObj[wtcache][idx])/mib_conv)
 
-    def checkMetricHourly(self, curr_mean, prev_mean, met):
-        if prev_mean[met] != 0 and (abs(curr_mean[met]-prev_mean[met])/prev_mean[met]) > self.threshold:
-            return True
-        # if met == "ss wt cache.bytes dirty in the cache cumulative" or (met.startswith("ss wt concurrentTransactions") and not met.endswith("totalTickets")):
-        #     return True
-        # if met.startswith("ss wt txn"):
-        #     return True
-        return False
-
-    
-
-    def calcBounds(self, df, pos, delt):
-        tbounds = {'t0': -1, 'c_ub': -1, 'c_lb': -
-                   1, 'p_lb': -1}  # p_ub is equal to c_lb
-        tdelta = timedelta(seconds=delt)
-        for idx in range(pos, -1, -1):
-            if df.iloc[idx]['ss wt concurrentTransactions.write.available'] > self.ticketlim \
-                    and df.iloc[idx]['ss wt concurrentTransactions.read.available'] > self.ticketlim:
-                tbounds['t0'] = idx
+    def calcBounds(self, df, pos, delt): #if our bucket is 5 mins each, delt is 2.5 mins
+        tbounds=[]
+        t0=-1
+        # for idx in range(pos, -1, -1):
+        #     if df.iloc[idx]['ss wt concurrentTransactions.write.available'] > self.ticketlim \
+        #             and df.iloc[idx]['ss wt concurrentTransactions.read.available'] > self.ticketlim:# work on it
+        #         t0 = idx
+        #         break
+        pos1=pos-600
+        for idx in range(pos1,pos1+900):
+            print(df.index[idx])
+            if df.iloc[idx]['ss wt concurrentTransactions.write.available'] < self.ticketlim \
+                    or df.iloc[idx]['ss wt concurrentTransactions.read.available'] < self.ticketlim:
+                t0=idx
+                print("found ticket drop at:",df.index[t0])
                 break
-        t0_val = df.index[tbounds['t0']]
-        for idx in range(tbounds['t0'], len(df), 1):
-            if df.index[idx]-t0_val >= tdelta:
-                tbounds['c_ub'] = idx
-                break
-        for idx in range(tbounds["t0"], -1, -1):
-            if t0_val-df.index[idx] >= tdelta and tbounds['c_lb'] == -1:
-                tbounds['c_lb'] = idx
-            if t0_val-df.index[idx] >= 3*tdelta and tbounds['p_lb'] == -1:
-                tbounds['p_lb'] = idx
-                break
+        print(t0)
+        idx=t0+delt #
+        while(not df.index[idx] and idx <len(df)):
+            idx+=1
+        tbounds.insert(0,idx)
+        for i in range(0,self.nbuckets):
+            idx-=2*delt
+            while(not df.index[idx] and idx>0):
+                idx-=1
+            tbounds.insert(0,idx)
+        print(pos)
+        print(tbounds)
         return tbounds
+    
+    def has_outliers(self,data, multiplier=1.1):
+        Q1 = np.percentile(data, 25)
+        Q3 = np.percentile(data, 75)
+        IQR = Q3 - Q1
+        dev=multiplier*IQR
+        # Compute lower and upper bounds for outliers
+        lower_bound = Q1 -dev
+        upper_bound = Q3 +dev
 
-    def hourlyAnalytics(self, df):
-        to_monitor = []
-        start = df.index[0]
-        end = min(df.index[-1], start+timedelta(hours=6))
-        while (start <= end):
-            nxt = start+timedelta(minutes=60)
-            for met in df.columns:
-                if met not in to_monitor:
-                    tr, v = checkMetric(df.loc[start:nxt], met)
-                    if tr:
-                        to_monitor.append(met)
-            start = nxt
-        vert_x = []
-        start = df.index[0]
-        while start < end:
-            start = start+timedelta(hours=1)
-            vert_x.append(start)
-        print(vert_x)
-        self.__plot(df, to_monitor, vert_x, "hourly data", "fig_hourly.pdf")
+        # Check if any value is an outlier
+        ctr=0
+        curr_ctr=0
+        curr_inc=None
+        for value in data:
+            # nmean=np.mean(data)
+            if value < lower_bound or value > upper_bound :
+                nmean=(np.sum(data)-value)/(len(data)-1)
+                if nmean==0:
+                    continue
+                inc=(value-nmean)/nmean
+                if abs(inc)>=0.05:
+                    if curr_inc==None:
+                        curr_inc=inc
+                        curr_ctr=ctr
+                    elif ctr>curr_ctr:
+                        curr_inc=inc
+                        curr_ctr=ctr
+                    print(value)
+                    # return True,ctr,inc
+            ctr+=1
+        
+        if curr_inc!=None and curr_ctr>=len(data)-3:
+            return True,curr_ctr,curr_inc
+
+        return False,ctr,0
+    def percentileChange(self,data,mean):
+        print(data)
+        rate_of_increase = [((data[i+1] - data[i])/data[i]) if data[i]!=0 else 0 for i in range(len(data)-1)]
+        pc=0;nc=0
+        for r in rate_of_increase:
+            if r<0 and r<-0.5:
+                nc+=1
+            elif r>0 and r>0.5:
+                pc+=1
+        if all(m<=1.25*np.mean(mean) for m in mean):
+            return False
+        if pc >= len(rate_of_increase)//2 or nc >=len(rate_of_increase)//2:
+            return True
+        return False
+    def checkMetric(self,df, met, timebounds):
+        df1=df.iloc[timebounds[0]:timebounds[-1]]
+        maxval=df1[met].max()
+        maxpos= np.argmax(df1[met].values)
+        bucket=maxpos//self.tdelta
+        if "ss wt cache fill ratio"==met and maxval>=80:
+            nmean = df1[met].mean()
+            print(met,bucket,nmean)
+            ch= (maxval-nmean)/nmean
+            return True,bucket,(nmean,ch)
+        if "ss wt cache dirty fill ratio"==met and maxval>=5:
+            nmean = df1[met].mean()
+            print(met,bucket,nmean)
+            ch= (maxval-nmean)/nmean
+            return True,bucket,(nmean,ch)
+    # print(met)
+        p99=[]
+        mean=[]
+        for t in range(0,len(timebounds)-1):
+            temp=df.iloc[timebounds[t]:timebounds[t+1]][met].values
+            p99.append(np.percentile(temp,99))
+            mean.append(np.mean(temp))
+        print(met)
+        print(mean,p99)
+        tr,idx,inc=self.has_outliers(mean)
+        tr1 = self.percentileChange(p99,mean)
+        if tr or tr1:
+            return True,idx,(np.mean(mean),inc)
+        return False,idx,(0,0,0)
 
     def analytics(self, metricObj, queryTimestamp):
         self.__getAverageLatencies(metricObj)
@@ -363,7 +344,7 @@ class FTDC_an:
         self.__getMemoryFragRatio(metricObj)
         self.__getDirtyFillRatio(metricObj)
         self.__getCacheFillRatio(metricObj)
-        self.__diskUtilization(metricObj)
+        # self.__diskUtilization(metricObj)
         un_len = {}  # debug
         for key in metricObj:
             if len(metricObj[key]) not in un_len:
@@ -393,41 +374,63 @@ class FTDC_an:
         self.__renameCols(df)
         # self.hourlyAnalytics(df)
         to_monitor = []
-        gpt_str_base = '''
-        Following are the anomalous metrics obtained for a server running mongodb when around the time it started facing ticket drops. Each line has metric and its percentage change separated by space. What do you infer from these metrics, instead of looking individually at each metric, select those metrics which you think are more impactful than others.
-        sm stands for system metrics
-        ss stands for server status
-        wt stands for wiredtiger
-        If the majority of these changes are negative, consider that now conditions are normal and was severe before, use it to predict what could be a root cause to these conditions in a mongo server. Analyse each metric, but report metrics of the highest impact and those that could be interrelated with each other as well. Perform any other analysis as you deem fit. Try to conclude to a list of specific possible reasons causing the issue.
-        '''
+        
         # return
-        tbounds = self.calcBounds(df, pos, self.tdelta)
-        print(df.index[pos])
+        tbounds = self.calcBounds(df, pos, self.tdelta//2)
+        # print(df.index[pos])
         for ky in tbounds:
-            print(ky, df.index[tbounds[ky]])
+            print(ky, df.index[ky])
         # gpt_str = gpt_str_base
         # curr_mean, prev_mean = self.__meanCalc(df, tbounds)
-        pool = mp.Pool(6)  # create a multiprocessing Pool
-        # prepare the arguments for the worker function
-        args = [(df.iloc[tbounds['p_lb']:tbounds['c_ub']+1], metric) for metric in df.columns]
-        results = pool.map(checkMetric_wrapper, args)  # process the list using pool of workers
-        # get the metrics for which checkMetric returned True
-        to_monitor = [result[1] for result in results if result[1] is not None]
-        pool.close()
-        print(to_monitor)
-        results.sort(reverse=True)
-        for x in results:
-            if x[1] is not None:
-                print(x)
+        anomaly_map={}
 
-        # for metric in df.columns:
+        for metric in df.columns:
+            try:
+                tr,val,inc=self.checkMetric(df,metric, tbounds)
+            except Exception as e:
+                print(self.checkMetric(df,metric,tbounds))
+                # exit(1)
+            if tr:
+                to_monitor.append(metric)
+                if val not in anomaly_map:
+                    anomaly_map[val]=[]
+                anomaly_map[val].append([metric,inc])
+            # break
+        print(to_monitor)
+        print(len(to_monitor))
+        gpt_str_base = f'''My mongodb server has seen a sheer drop in write Tickets at Timestamp {queryTimestamp}. The task is to perform root cause analysis of the ticket drop, so I want you to locate what was the cause of the ticket drop. FYI, a ticket drop means that concurrentTransactions.write.out has increased and keeps pushing towards 128(its maximum configured limit). Use your own understanding of mongodb and wiredtiger metrics to analyse the data. In the given data, each timestamp has a list of anomalous metrics followed by the percentage change from the mean and the mean, all space separated. A negative value means the value has decreased compared to the mean value of the metric. A negative value at an older timestamp would mean that the metric was lower in value previously. Using the data, try to locate the root cause of the ticket drop.  First give a summary of the analysis and then move to the explanation. Structure the output properly. Do not leave out any important information/relevant metric. 
+
+When analyzing, please consider:
+
+Cache dirty ratio > 5% and/or Cache fill ratio > 80%, which indicate that cache eviction has started by worker threads.
+Cache dirty ratio > 20% and/or Cache fill ratio > 95%, which indicate that cache eviction has started by application threads.
+'cursor.cached cursor count', the number of cursors currently cached by the WiredTiger storage engine.
+'history store score', an indicator of the pressure the history store is placing on the cache.
+However, do not limit the analysis to these pointers. Each timestamp represents a 10-minute interval following it, for example, 13:07:00 represents the period from 13:07:00 to 13:16:59. Hence, do not use exact timestamps in your response.
+
+Provide a brief summary of the analysis first, then delve into detailed explanations. Structure your response effectively and ensure all relevant information/metrics are included.
+
+Please note the abbreviations:
+
+'sm' stands for system metrics
+'ss' stands for server status mongo db
+'wt' stands for wiredtiger.'''
+        sorted_keys = sorted(anomaly_map.keys())
+        for ts in sorted_keys:
+            tsss=df.index[tbounds[ts]]
+            gpt_str_base+=f"{tsss}:\n"
+            for val in anomaly_map[ts]:
+                gpt_str_base+=f"{val[0]} {val[1][1]*100:.2f}% {val[1][0]}\n"
+        with open("gpt-input.txt",'w') as gpt:
+            gpt.write(gpt_str_base)
+        # return
             
         #     try:
         #         tr, val = checkMetric(
         #             df.iloc[tbounds['p_lb']:tbounds['c_ub']+1], metric)
-        
-        self.__plot(df[tbounds['p_lb']:tbounds['c_ub']+1],
-                             to_monitor,main_title="metric-A", vert_x=queryTimestamp)
+        vertical = (df.index[(tbounds[-1]+tbounds[-2])//2])
+        self.__plot(df.iloc[tbounds[0]:tbounds[-1]],
+                             to_monitor,main_title="metric-A", vert_x=vertical)
 
     def parseAll(self):
         def delta(metrList):
@@ -440,6 +443,8 @@ class FTDC_an:
             # if met.startswith("serverStatus.metrics.aggStageCounters") or met.startswith("serverStatus.metrics.commands"):
             #     return True
             if met.startswith("systemMetrics.disks"):
+                return True
+            if met.startswith("replSetGetStatus.members") and (met.endswith("state") or met.endswith("health")):
                 return True
             return False
 

@@ -62,6 +62,7 @@ if __name__ == "__main__":
     print(filtered_files)
     if len(argv)==5:
         duration=int(float(argv[4])*60)
+        print("bucket duration set to: ",duration, "seconds")
         decoder = FTDC(filtered_files,query_dt,argv[3],duration)
     else:
         decoder = FTDC(filtered_files,query_dt,argv[3])
