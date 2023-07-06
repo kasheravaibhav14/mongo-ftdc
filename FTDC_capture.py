@@ -3,7 +3,7 @@ from sys import argv
 from datetime import datetime,timedelta
 from FTDC_decoder import FTDC
 import time
-import PyPDF4
+
 def convert_to_datetime(datetime_str):
     datetime_format = "%Y-%m-%dT%H-%M-%SZ-%f"
     datetime_obj = datetime.strptime(datetime_str, datetime_format)
@@ -14,30 +14,10 @@ def getDTObj(date_string):
     parsed_datetime = datetime.strptime(date_string, format_string)
     return parsed_datetime
 
-def mergePDF(outfilename):
-    if not outfilename.endswith(".pdf"):
-        outfilename+=".pdf"
-    pdf1File = open('fig.pdf', 'rb')
-    pdf2File = open('fig_hourly.pdf', 'rb')
-    pdf1Reader = PyPDF4.PdfFileReader(pdf1File)
-    pdf2Reader = PyPDF4.PdfFileReader(pdf2File)
-
-    pdfWriter = PyPDF4.PdfFileWriter()
-    pdfWriter.addPage(pdf1Reader.getPage(0))  # adding the first page from pdf1
-    pdfWriter.addPage(pdf2Reader.getPage(0))  # adding the first page from pdf2
-
-    with open(outfilename,'wb') as f_out:
-        pdfWriter.write(f_out)
-    
-    pdf1File.close()
-    pdf2File.close()
-
-
-
 if __name__ == "__main__":
     st=time.time()
     if(len(argv)<4):
-        print("use python3 <FTDC_capture.py> <diagnostic.data> <qTstamp> <outfilename> <duration in mins>")
+        print("use python3 <FTDC_capture.py> <diagnostic.data> <qTstamp> <outfilename> <bucket duration in mins>")
         exit(1)
     dirPath=pathlib.Path(argv[1])
     if not dirPath.is_dir():
@@ -59,6 +39,8 @@ if __name__ == "__main__":
                 filtered_files.append(file)
 
     filtered_files.sort()
+    if len(filtered_files)==0:
+        raise("No files corresponding to the queryTimestamp found. Please check the timestamp/path and try again!")
     print(filtered_files)
     if len(argv)==5:
         duration=int(float(argv[4])*60)

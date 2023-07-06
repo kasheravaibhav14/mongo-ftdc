@@ -4,22 +4,24 @@ from reportlab.lib.pagesizes import A3
 from svglib.svglib import svg2rlg
 from reportlab.graphics import renderPDF
 from reportlab.platypus import Paragraph
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 import numpy as np
 import matplotlib.ticker as mtick
 import pandas as pd
 import os
-import plotly.graph_objects as go
+import markdown
+from bs4 import BeautifulSoup
+
 
 class FTDC_plot:
-    def __init__(self, df, to_monitor,vert_x,outfilepath="report.pdf"):
+    def __init__(self, df, to_monitor,vert_x,gpt_out="",outfilepath="report.pdf"):
         self.df = df
         self.to_monitor = to_monitor
         self.outPath = outfilepath
         self.vert_x = vert_x
-        self.subheadings = ["ss","ss metrics", "sm", "ss tcmalloc"]
-        self.expandedSub = {"ss":"serverStatus", "ss metrics":"metrics", "sm":"systemMetrics", "ss tcmalloc": "tcmalloc"}
-    
+        self.subheadings = ["ss wt","ss","ss metrics", "sm", "ss tcmalloc",]
+        self.expandedSub = {"ss wt":"wiredTiger","ss":"Server status", "ss metrics":"Query metrics", "sm":"System metrics", "ss tcmalloc": "tcmalloc"}
+        self.markdown_string = gpt_out
     def custom_sort(self,arr):
         def compare_strings(s):
             if s.startswith("ss wt concurrentTransactions."):
@@ -32,20 +34,67 @@ class FTDC_plot:
                 return (3, s)
             else:
                 return (4, s)
-
         arr.sort(key=compare_strings)
-    
+    def dumpGPT(self,canvas, y=A3[1]):
+        """
+        Convert a markdown string to a PDF file.
+
+        :param markdown_string: The markdown content.
+        :param canvas: The reportlab.pdfgen.canvas.Canvas instance.
+        """
+        STYLES = getSampleStyleSheet()
+        STYLE_LI = ParagraphStyle('listItem', parent=STYLES['Normal'], fontSize=12, leading=12, firstLineIndent=10)
+        STYLE_P = ParagraphStyle('paragraphItem', parent=STYLES['Normal'], fontSize=14, leading=14, firstLineIndent=20)
+
+        html = markdown.markdown(self.markdown_string)
+        soup = BeautifulSoup(html, 'html.parser')
+
+        width, height = A3
+        width-=50
+
+        for elem in soup:
+            print(elem.name)
+            if elem.name == 'h1':
+                para = Paragraph(elem.text, STYLES['Heading1'])
+                w, h = para.wrap(width, height)
+                y -= h
+                para.drawOn(canvas, 20, y)
+                y -= 12
+            elif elem.name == 'h2':
+                para = Paragraph(elem.text, STYLES['Heading2'])
+                w, h = para.wrap(width, height)
+                y -= h
+                para.drawOn(canvas, 20, y)
+                y -= 12
+            elif elem.name == 'p':
+                para = Paragraph(elem.text, STYLE_P)
+                w, h = para.wrap(width, height)
+                y -= h
+                para.drawOn(canvas, 20, y)
+                y -= 12
+            elif elem.name in ['ol', 'ul']:
+                for it in elem:
+                    if it.name == 'li':
+                        para = Paragraph("- " + it.text, STYLE_LI)
+                        w, h = para.wrap(width, height)
+                        y -= h
+                        para.drawOn(canvas, 20, y)
+                        y -= 10
+
+            if y < 25:  # Arbitrarily chosen value; you may need to adjust.
+                canvas.showPage()
+                y = height
+        canvas.showPage()
     def plot(self):
         self.custom_sort(self.to_monitor)
         seen_subheadings=set()
         # Prepare the canvas
         c = canvas.Canvas(self.outPath, pagesize=A3)
         page_width, page_height = A3
-        # plt.cm.get_cmap('magma')
         plt.style.use('ggplot')
         # Define column widths
-        total_parts = 2 + 2 + 7 + 4
-        column_widths = [page_width / total_parts * i for i in [2, 2, 7, 4]]
+        total_parts = 2 + 2 + 7 + 3
+        column_widths = [page_width / total_parts * i for i in [2, 2, 7, 3]]
 
         # Define image dimensions
         image_width = column_widths[2]
@@ -70,6 +119,7 @@ class FTDC_plot:
                 P.drawOn(c, sum(column_widths[:idx]), page_height - header_height)
         
         draw_headers()
+        subheadings_sorted = sorted(self.subheadings, key=len, reverse=True)
         for i in range(len(self.to_monitor)):
 
             # If we don't have enough space for the next pair, create a new page
@@ -77,16 +127,17 @@ class FTDC_plot:
                 c.showPage()
                 current_y = page_height - image_height - header_height - padding
                 draw_headers()  # Draw headers at the start of each new page
-
-            for subheading in self.subheadings:
-                if self.to_monitor[i].startswith(subheading) and subheading not in seen_subheadings:
-                    seen_subheadings.add(subheading)  # Remember that we've seen this subheading
-                    # Add the subheading to the PDF
-                    text_subheading = f"<font size=10><i>{self.expandedSub[subheading]}</i></font>"
-                    P = Paragraph(text_subheading)
-                    P.wrapOn(c, page_width, 500)
-                    current_y -= 1 * space_per_pair  # Leave some space after the subheading
-                    P.drawOn(c, 25, current_y + 1.5 * space_per_pair)  # Adjust the position as needed
+            
+            for subheading in subheadings_sorted:
+                if self.to_monitor[i].startswith(subheading):
+                    if subheading not in seen_subheadings:
+                        seen_subheadings.add(subheading)  # Remember that we've seen this subheading
+                        # Add the subheading to the PDF
+                        text_subheading = f"<font size=10><i>{self.expandedSub[subheading]}</i></font>"
+                        P = Paragraph(text_subheading)
+                        P.wrapOn(c, page_width, 500)
+                        current_y -= 1 * space_per_pair  # Leave some space after the subheading
+                        P.drawOn(c, 25, current_y + 1.5 * space_per_pair)  # Adjust the position as needed
                     break  # Stop checking other subheadings
             x = self.df.index
             y = self.df[self.to_monitor[i]]
@@ -100,15 +151,12 @@ class FTDC_plot:
             ax.axvline(x=self.vert_x, color='b', linestyle='--', linewidth=0.5)
             if current_y - 2*space_per_pair <0 or i==len(self.to_monitor)-1:
                 ax.set_xlabel('Timestamp',fontsize=8) # print the y label only when it is last plot of page
-            # ax.set_xticks([])
-            # ax.set_yticks([])
             plt.yticks(fontsize=5,fontname='Helvetica')
             plt.xticks(fontsize=5)
             fmt = mtick.StrMethodFormatter('{x:0.2e}')
             ax.yaxis.set_major_formatter(fmt)
             inc = (maxval-minval)*0.1
             ax.set_ylim(minval-inc,maxval+inc)
-            # # ax.set_ylabel('y')
 
             # Add a horizontal line at y=0.5
             ax.axhline(y=meanval, color='black', linestyle='--',linewidth=0.25)
@@ -152,5 +200,6 @@ class FTDC_plot:
             current_y -= space_per_pair
 
         # Save the PDF
-        c.showPage()
+        # c.showPage()
+        self.dumpGPT(c,current_y)
         c.save()

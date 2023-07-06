@@ -270,11 +270,5 @@ Memory operations such as allocations, frees, and re-allocations are fundamental
 
 While these metrics provide valuable insight, it's important to remember that they are just one piece of the puzzle when monitoring application performance. They should be interpreted in the context of other performance metrics and the specific workload your MongoDB instance is handling. If any of these metrics are trending in an unexpected direction, it might be worth investigating whether changes in your application or workload could be causing increased memory operations.
 
-Questions:
-1. indexBulkBuilder.filesOpened - filesClosed should be a metric, will give us more information [pass]
-2. indexBulkBuilder.count,resumed - usable? [pass]
-3. latchAnalysis? - Did not see in our logs, and has to be manually specified to enable anyways [pass]
-4. Ask about serverStatus.logicalSessionRecordCache discards
-5. What to do about "serverStatus.opReadConcernCounters and oplogTruncation" ?
-6. Ask if repl.lastWrite.opTime is of any use, since it is just a timestamp?
-7. Ask about the remaining tcmalloc stats and their use?
+Working:
+1. Decode the FTDC files based on timestamps, each log file is made up of chunks of 5 minutes of data and is named as per the first timestamp in the file. Taking all those files whose timestamps are at a delta of 6 hours absolute from our requested timestamp. `FTDC_capture.py`

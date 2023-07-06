@@ -3,10 +3,9 @@ from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import IsolationForest
-from matplotlib import pyplot as plt
-from pprint import pprint
 from FTDC_plot import FTDC_plot
-
+import openai
+import os
 
 class FTDC_an:
     def __init__(self, metricObj, qTstamp, outPDFpath, duration):
@@ -16,17 +15,16 @@ class FTDC_an:
         self.tdelta = duration
         self.outPDF = outPDFpath
         self.nbuckets = 12
-        self.meanThreshold =1.1
+        self.meanThreshold = 1.25
 
-    def __plot(self, df, to_monitor, vert_x, main_title="metric-A", outfilename="fig.pdf"):
+    def __plot(self, df, to_monitor, vert_x, gpt_out=""):
         to_monitor.sort()
-        df1 = df[to_monitor]
         end_index = self.outPDF.rindex("/")
         outlierPath = self.outPDF[:end_index]+'/outliers.csv'
         df.to_csv(outlierPath, index=True)
         # print("Monitoring: ", str(to_monitor))
         print(len(to_monitor))
-        plot_ob = FTDC_plot(df, to_monitor, vert_x, self.outPDF)
+        plot_ob = FTDC_plot(df, to_monitor, vert_x,gpt_out,self.outPDF)
         plot_ob.plot()
         return
 
@@ -114,9 +112,8 @@ class FTDC_an:
 
         for disk in disks:
             io = "systemMetrics.disks."+disk+".io_time_ms"
-            queue = "systemMetrics.disks."+disk+".io_queued_ms"
-            newkey = "systemMetrics.disks."+disk+" utilization"
-            if io not in metricObj or queue not in metricObj:
+            newkey = "systemMetrics.disks."+disk+" utilization%"
+            if io not in metricObj:
                 continue
             metricObj[newkey] = []
             for idx in range(len(metricObj[io])):
@@ -124,7 +121,7 @@ class FTDC_an:
                     metricObj[newkey].append(0)
                 else:
                     metricObj[newkey].append(
-                        (100*metricObj[io][idx])/(metricObj[io][idx]+metricObj[queue][idx]))
+                        (metricObj[io][idx])/(10))
 
     def __tcmallocminuswt(self, metricObj):
         wtcache = "serverStatus.wiredTiger.cache.bytes currently in the cache"
@@ -144,21 +141,27 @@ class FTDC_an:
         tbounds = []
         t0 = -1
         pos1 = pos-self.tdelta*2
+        typ=-1
         for idx in range(pos1, pos1+3*self.tdelta):
             print(df.index[idx])
-            if df.iloc[idx]['ss wt concurrentTransactions.write.available'] < self.ticketlim \
-                    or df.iloc[idx]['ss wt concurrentTransactions.read.available'] < self.ticketlim:
+            if df.iloc[idx]['ss wt concurrentTransactions.write.available'] < self.ticketlim:
                 t0 = idx
-                print("found ticket drop at:", df.index[t0])
+                typ=1
+                print("found write ticket drop at:", df.index[t0])
+                break
+            if df.iloc[idx]['ss wt concurrentTransactions.read.available'] < self.ticketlim:
+                t0 = idx
+                typ=2
+                print("found read ticket drop at:", df.index[t0])
                 break
         print(t0)
         idx = t0+delt
-        for i in range(0,self.nbuckets//6):
-            while (not df.index[idx] and idx < len(df)):
-                idx += 1
-            tbounds.append(idx)
-            idx+=2*delt
-        idx=t0+delt
+        # for i in range(0, 2): # one extra bucket ahead if available
+        while (not df.index[idx] and idx < len(df)):
+            idx += 1
+        tbounds.append(idx)
+            # idx += 2*delt
+        # idx = t0+delt
         for i in range(0, self.nbuckets):
             idx -= 2*delt
             while (not df.index[idx] and idx > 0):
@@ -166,9 +169,10 @@ class FTDC_an:
             tbounds.insert(0, idx)
         print(pos)
         print(tbounds)
-        return tbounds,t0
+        return tbounds, t0, typ
 
-    def has_outliers(self, data, multiplier=1.1):
+    def has_outliers(self, data):
+        multiplier = self.meanThreshold
         Q1 = np.percentile(data, 25)
         Q3 = np.percentile(data, 75)
         IQR = Q3 - Q1
@@ -190,196 +194,311 @@ class FTDC_an:
                 elif ctr > curr_ctr:
                     curr_val = value
                     curr_ctr = ctr
-                print(value, curr_ctr)
-                # return True,ctr,inc
             ctr += 1
 
-        if curr_val != None and curr_ctr >= len(data)-3:
+        if curr_val != None and curr_ctr >= len(data)-5:
+            print("Mean outlier: ",curr_val,curr_ctr)
             return True, curr_ctr
         return False, ctr
 
-    def percentileChange(self, data):
+    def percentileChange(self,data):
+        # Ensure data is a numpy array and reshape it.
         data = np.array(data).reshape(-1, 1)
+        
+        # Initialize and fit the IsolationForest model.
         iso_forest = IsolationForest(contamination=0.05)
         iso_forest.fit(data)
+        
+        # Predict outliers in the data.
         pred = iso_forest.predict(data)
+        
+        # Identify and print the outliers.
         outliers = data[pred == -1]
-        indices = np.where(outliers)
-        if len(outliers) > 0 and indices[-1][0]>=len(data)-5:
-            print("outliers:", outliers,indices[-1][0])
-            return True, indices[-1][0]
+        # print('Outliers:', outliers)
+        
+        # Check if there are no outliers.
+        if len(outliers) == 0:
+            return False, 0
+        
+        # Find the index of the last outlier.
+        last_outlier_index = np.where(data == outliers[-1])[0][0]
+        
+        # Check if the last outlier is within the last three elements.
+        if len(data) - last_outlier_index <= 3:
+            print(f"Outlier within last 3 elements: {outliers[-1]}, Index: {last_outlier_index}")
+            return True, last_outlier_index
+        
         return False, 0
 
-    def checkMetric(self, df, met, timebounds):
-        df1 = df.iloc[timebounds[0]:timebounds[-1]]
-        maxval = df1[met].max()
-        maxpos = np.argmax(df1[met].values)
-        bucket = maxpos//self.tdelta
-        if ("ss wt cache fill ratio" == met and maxval >= 80) or ("ss wt cache dirty fill ratio" == met and maxval >= 5) or ("ss wt cache.history store score" == met and maxval >= 50):
-            nmean = df1[met].mean()
-            # print(met, bucket, nmean)
-            ch = (maxval-nmean)/nmean
-            return True, bucket, (0, nmean, maxval)
+    def calculate_statistics(self, data):
+        return np.mean(data), np.percentile(data, 99)
+
+    def is_mean_stable(self, mean_values):
+        if np.mean(mean_values) == 0:
+            return True
+        if all(abs(m / np.mean(mean_values)) <= self.meanThreshold for m in mean_values):
+            return True
+        return False
+
+    def check_metric(self, df, met, timebounds,flag=0):
+        """
+        Analyzes a specific metric in a pandas DataFrame within a specific time window.
+
+        Args:
+            df (DataFrame): Input pandas DataFrame.
+            met (str): The metric to be analyzed.
+            timebounds (list): Time boundaries.
+
+        Returns:
+            tuple: Tuple containing a boolean indicating whether a condition has been met,
+                a bucket or index, and a tuple of statistics.
+        """
+        print(met)
+        df_slice = df.iloc[timebounds[0]:timebounds[-1]]
+        maxval = df_slice[met].max()
+        maxpos = np.argmax(df_slice[met].values)
+        bucket = maxpos // self.tdelta
+
         p99 = []
-        mean = []
-        for t in range(0, len(timebounds)-1):
-            temp = df.iloc[timebounds[t]:timebounds[t+1]][met].values
-            # print(temp)
-            p99.append(np.percentile(temp, 99))
-            mean.append(np.mean(temp))
-        # print(met)
-        # print(mean, p99)
-        if np.mean(mean) == 0 or (np.mean(mean) != 0 and all(abs(m/np.mean(mean)) <=  self.meanThreshold for m in mean)):
+        means = []
+
+        for t in range(0, len(timebounds) - 1):
+            temp_values = df.iloc[timebounds[t]:timebounds[t + 1]][met].values
+            mean, percentile_99 = self.calculate_statistics(temp_values)
+            p99.append(percentile_99)
+            means.append(mean)
+        print(means)
+        print(p99)
+        special_metrics = {"ss wt cache fill ratio": 80, "ss wt cache dirty fill ratio": 5}
+        special_metrics_perc = {"ss wt concurrentTransactions.read.out":80,"ss wt concurrentTransactions.write.out":80, "ss wt cache.history store score": 90}
+        if self.is_mean_stable(means) and not (met in special_metrics_perc) and (met not in special_metrics):
             return False, 0, ()
-        tr, idx = self.has_outliers(mean)
-        tr1, idx1 = self.percentileChange(p99)
-        if tr:
-            return True, idx, (0, np.mean(mean), mean[idx])
+        if met in special_metrics:
+            indices = [index for index, element in enumerate(means) if element > special_metrics[met]]
+            if indices:
+                return True, max(indices), (means[max(indices)],np.mean(means),p99[max(indices)],np.mean(p99))
+            elif maxval >= special_metrics[met]:
+                mean = df_slice[met].mean()
+                return True, bucket, (means[bucket], np.mean(means), p99[bucket],np.mean(p99))
+            return False,0,()
+        if met in special_metrics_perc:
+            indices = [index for index, element in enumerate(p99) if element > special_metrics_perc[met]]
+            if indices:
+                return True, max(indices), (means[max(indices)],np.mean(means),p99[max(indices)],np.mean(p99))
+            else:
+                return False,0,()
+
+        tr, idx = self.has_outliers(means)
+        if flag==0:
+            tr1, idx1 = self.percentileChange(p99)
+        else:
+            tr1, idx1 = self.has_outliers(p99)
+
+        if tr and tr1:
+            return True, idx, (means[idx],np.mean(means),p99[idx],np.mean(p99))
+        elif tr:
+            return True, idx, (means[idx],np.mean(means),p99[idx],np.mean(p99))
         elif tr1:
-            return True, idx1, (1, np.mean(p99), p99[idx1])
+            return True, idx1, (means[idx1],np.mean(means),p99[idx1],np.mean(p99))
         return False, 0, ()
 
-    def analytics(self, metricObj, queryTimestamp):
+
+    def _init_analytics(self, metricObj):
         self.__getAverageLatencies(metricObj)
         self.__tcmallocminuswt(metricObj)
         self.__getMemoryFragRatio(metricObj)
         self.__getDirtyFillRatio(metricObj)
         self.__getCacheFillRatio(metricObj)
-        # self.__diskUtilization(metricObj)
-        un_len = {}  # debug
-        for key in metricObj:
-            if len(metricObj[key]) not in un_len:
-                # print(key, len(metricObj[key]))
-                un_len[len(metricObj[key])] = [key]
-            else:
-                un_len[(len(metricObj[key]))].append(key)
-        pprint(un_len)
+        self.__diskUtilization(metricObj)
+
+    def _prepare_dataframe(self, metricObj):
         df = pd.DataFrame(metricObj)
-        df['serverStatus.start'] = df['serverStatus.start'].apply(
-            self.getDTFromSecs)
+        df['serverStatus.start'] = df['serverStatus.start'].apply(self.getDTFromSecs)
         df['serverStatus.start'] = pd.to_datetime(df['serverStatus.start'])
         df.set_index('serverStatus.start', inplace=True)
         df.columns.name = 'metrics'
-        df.to_csv('./cases/1.csv')
-        print(df)
-        pos = np.where(df.index == queryTimestamp)[0][0]
-        # self.__findOutliersWithZscore(
-        #     df, 'serverStatus.wiredTiger.concurrentTransactions.write.out')
-        # self.__findOutliersWithZscore(df, 'serverStatus.wiredTiger.concurrentTransactions.read.out')
         self.__renameCols(df)
-        # self.hourlyAnalytics(df)
-        to_monitor = []
+        return df
 
-        # return
-        tbounds,t0 = self.calcBounds(df, pos, self.tdelta//2)
-        # print(df.index[pos])
-        for ky in tbounds:
-            print(ky, df.index[ky])
-        # gpt_str = gpt_str_base
-        # curr_mean, prev_mean = self.__meanCalc(df, tbounds)
+    def _calculate_anomalies(self, df, tbounds, to_monitor, mean_threshold=1.5):
+        def compare_strings(s):
+            if s.startswith("ss wt concurrentTransactions."):
+                return (0, s)
+            elif s.startswith("ss wt cache"):
+                return (1, s)
+            elif s.startswith("ss wt"):
+                return (2, s)
+            elif s.startswith("ss"):
+                return (3, s)
+            else:
+                return (4, s)
         anomaly_map = {}
-
+        myList = df.columns.tolist()
+        myList.sort(key=compare_strings)
         for metric in df.columns:
             try:
-                tr, idx, val = self.checkMetric(df, metric, tbounds)
-
+                tr, idx, val = self.check_metric(df, metric, tbounds)
             except Exception as e:
-                print(self.checkMetric(df, metric, tbounds))
-                # exit(1)
+                print("unable to insert metric:",metric)
             if tr:
                 to_monitor.append(metric)
-                if idx not in anomaly_map:
-                    anomaly_map[idx]={0:[],1:[]}
-                anomaly_map[idx][val[0]].append([metric,val[2],val[1]])
-            # break
-        if len(to_monitor)>60:
-            self.meanThreshold=1.25
-            anomaly_map={}
-            to_monitor_new=[]
-            for i in to_monitor:
-                try:
-                    tr, idx, val = self.checkMetric(df, i, tbounds)
-                except Exception as e:
-                    print(self.checkMetric(df, i, tbounds))
-                if tr:
-                    to_monitor_new.append(i)
-                    if idx not in anomaly_map:
-                        anomaly_map[idx]={0:[],1:[]}
-                    anomaly_map[idx][val[0]].append([i,val[2],val[1]])
-            to_monitor=to_monitor_new
+                anomaly_map = self._update_anomaly_map(metric,idx, val, anomaly_map)
+        # print(len(to_monitor))
+        if len(to_monitor) > 60:
+            print("recalculating")
+            self.meanThreshold = mean_threshold
+            anomaly_map, to_monitor = self._recalculate_anomalies(df, tbounds, to_monitor)
+        return anomaly_map, to_monitor
 
-        print(to_monitor)
-        print(len(to_monitor))
-        gpt_str_base = f'''You are a mongodb diagnostic engine specialising in determining the root cause of anomalous metrics provided to you. The given mongodb server has seen a sheer drop in write Tickets at Timestamp {df.index[t0]}.During this time period, there were no significant changes in the server's hardware or software configuration. 
+    def _update_anomaly_map(self, metric, idx, val, anomaly_map):
+        if idx not in anomaly_map:
+            anomaly_map[idx]=[]
+        anomaly_map[idx].append([metric, val[0], val[1], val[2],val[3]])
+        return anomaly_map
 
-        TASK: Perform root cause analysis of the ticket drop. 
+    def _recalculate_anomalies(self, df, tbounds, to_monitor):
+        anomaly_map = {}
+        to_monitor_new = []
+        for i in to_monitor:
+            try:
+                tr, idx, val = self.check_metric(df, i, tbounds,flag=1)
+            except Exception as e:
+                print(self.check_metric(df, i, tbounds))
+            if tr:
+                to_monitor_new.append(i)
+                anomaly_map = self._update_anomaly_map(i, idx, val, anomaly_map)
+        to_monitor = to_monitor_new
+        return anomaly_map, to_monitor
 
-        Background: In this context, a "ticket drop" means that concurrentTransactions.write.out or concurrentTransactions.read.out  has increased and keeps pushing towards 128(its maximum configured limit). This can happen when operations take longer to release the ticket, or there are a large number of concurrent requests to the server.Any operation or command first acquires a ticket based on its requirement(read/write), performs the operation and releases the ticket. When the number of avaialble tickets drop, it can be either due to some operations taking longer time to release the ticket, or a large number of concurrent requests to the server. 
-        
-        Therefore, I want you to use your own understanding of mongodb and wiredtiger engine metrics to understand and analyse the provided data. Using the data, try to locate the root cause of the ticket drop. First give a summary of the analysis and then move to the explanation. Structure the output properly. Do not leave out any important information/relevant metric. 
-
-Specific Information:
-
-Values(not percentage change) of cache dirty ratio > 5% and/or cache fill ratio > 80%, which indicate that cache eviction has started by worker threads.
-Similarly, values(not percentage change) of cache dirty ratio > 20% and/or cache fill ratio > 95%, which indicate that cache eviction has started by application threads.
-'cursor.cached cursor count' indicates the number of cursors currently cached by the WiredTiger storage engine.
-'history store score' is an indicator of the pressure the history store is placing on the cache.
-
-However, do not limit the analysis to these pointers. As a mongodb diagnostic specialist you have the responsibility to analyse the meaning of each metric and the consequence of the change in the values.
-
-Please note the abbreviations:
-
-'sm' stands for system metrics
-'ss' stands for server status
-'wt' stands for wiredtiger.
-
-Data Format & Interval:
-
-Each timestamp marks the beginning of a 10-minute interval, leading up to just before the next timestamp. The anomalous metrics data provided for each interval corresponds to either the mean or the 99th percentile value within the interval, which is then contrasted against the average value of that metric over all recorded intervals. Each timestamp has a list of anomalous metrics followed by information on the anomaly.
-
-DATA:
-
-'''
-        sorted_keys = sorted(anomaly_map.keys())
-        anomalyObj={}
+    def _create_anomaly_obj(self, sorted_keys, anomaly_map, tbounds, df):
+        anomalyObj = {}
         for ts in sorted_keys:
-            tsss=str(df.index[tbounds[ts]])
+            tsss = str(df.index[tbounds[ts]])
             if tsss not in anomalyObj:
-                anomalyObj[tsss]=[]
-            # gpt_str_base+=f"{tsss}:\n"
-            for val in anomaly_map[ts][0]:
+                anomalyObj[tsss] = []
+            for val in anomaly_map[ts]:
                 anomalyObj[tsss].append({
-                    "metric":val[0],
+                    "metric": val[0],
                     "anomaly interval mean": val[1],
                     "overall mean": val[2],
-                    "change percentage": 100*(val[1]-val[2])/val[2]
+                    # "change percentage mean": 100*(val[1]-val[2])/val[2],
+                    "anomaly interval 99th percentile":val[3],
+                    "overall mean 99th percentile":val[4]
                 })
-                # gpt_str_base+=f"{val[0]}: current interval mean:{val[1]}, overall mean: {val[2]}, change: {100*(val[1]-val[2])/val[2]}%\n"
-            for val in anomaly_map[ts][1]:
-                anomalyObj[tsss].append({
-                    "metric":val[0],
-                    "99th percentile of anomaly interval": val[1],
-                    "mean of 99th percentile of all intervals": val[2]
-                })
-                # gpt_str_base+=f"{val[0]}: 99 percentile of current interval:{val[1]}, mean of percentile of all intervals: {val[2]}\n"
-            gpt_str_base+=json.dumps(anomalyObj,default=str)
-        with open("gpt-input.txt",'w') as gpt:
+        return anomalyObj
+    def _create_gpt_str_base(self, df, t0, typ):
+        ticket_type = "write" if typ ==1 else "read"
+        gpt_str_base = f'''You are a mongodb diagnostic engine specialising in determining the root cause of anomalous metrics provided to you. The given mongodb server has seen a drop in available {ticket_type}ticketsat Timestamp {df.index[t0]}.During this time period, there were no significant changes in the server's hardware or software configuration. A "ticket drop" in this scenario signifies a continuous rise towards the 128(max) of either concurrentTransactions.write.out or concurrentTransactions.read.out, typically due to lengthy operations not releasing the ticket promptly or an influx of concurrent server requests. Each operation acquires a ticket and releases it after the task is done.
+
+TASK: Your task, as a MongoDB diagnostic specialist, is to analyze the given data with reference to MongoDB and WiredTiger engine metrics to determine the ticket drop's root cause.Please analyze each and every metric listed in the table provided. 
+
+Output Format: Provide a well-structured summary first and then a detailed explanation of your analysis. Make sure no crucial details or metrics are overlooked.
+
+Important thresholds and information include:
+- Worker threads initiate cache eviction when cache dirty ratio exceeds 5% or cache fill ratio goes beyond 80%.
+- Application threads start eviction if cache dirty ratio is over 20% or cache fill ratio surpasses 95%. Application performance is affected when these threads execute evictions.
+- Evicting a modified page is costlier than an unmodified one due to reconciliation and disk writing requirements.
+- Any statistics related to eviction must be analysed thoroughly as they have an impact on worker threads and cache.
+- 'cursor.cached cursor count' denotes the count of cursors currently cached by the WiredTiger engine.
+- 'history store score' reflects the pressure exerted on the cache by the history store.
+- Disk utilization values nearing 100% might trigger a disk bottleneck.
+- The logicalSessionRecordCache is a cache of active logical session records, and MongoDB uses it to track the state of the client sessions. It periodically updates this cache and the session collection in the MongoDB database.
+
+These pointers should supplement your analysis, not limit it. As a specialist, interpret each metric and its implications.
+Abbreviations to note:
+'sm' - system metrics, 'ss' - server status, 'wt' - wiredtiger.
+
+Data Format:
+Each timestamp denotes the interval from itself to {self.tdelta//60} minutes ahead of it. For example, anomaly interval mean at timestamp t, means the mean of the given metric in [t,t+{self.tdelta//60} minutes].
+The data contains timestamps and a list of anomalous metrics that were anomalous in that timestamp interval. The meaning of each heading is as follows:
+anomaly interval mean: mean of the metric in the timestamp interval where it was anomalous 
+overall mean: mean of the metric over the monitored duration
+anomaly interval 99th percentile: 99th percentile value of the metric in the timestamp interval where it was anomalous 
+overall mean 99th percentile: mean of 99th percentile value of all intervals in the monitored duration 
+
+NOTE: The focus is on in-depth analysis, so please refer to definitions and detailed implications of each metric as needed from your model.
+        '''
+        return gpt_str_base
+    def _save_gpt_str_base(self, gpt_str_base):
+        with open("gpt-input.txt", 'w') as gpt:
             gpt.write(gpt_str_base)
+    def _openAI_req(self, message):
+        KEY_NAME= 'OPENAI_API_KEY'
+        key = os.environ.get(KEY_NAME)
+        if key is not None:
+            openai.api_key = key
+            completion=openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role":"user", "content":message}
+                ]
+            )
+            outp=completion.choices[0].message.content
+            return outp
+        else:
+            print("No key found in the environment variable")
+            return ""
+
+    def analytics(self, metricObj, queryTimestamp):
+        self._init_analytics(metricObj)
+        df = self._prepare_dataframe(metricObj)
+        print(df)
+        pos = np.where(df.index == queryTimestamp)[0][0]
+
+        tbounds, t0, typ = self.calcBounds(df, pos, self.tdelta//2)
+        if typ==-1:
+            raise("No ticket drop found in the nearby interval. Please try with another timestamp or a higher bucket")
+        to_monitor = []
+        anomaly_map, to_monitor = self._calculate_anomalies(df, tbounds, to_monitor)
+        print(to_monitor)
+        print(len(to_monitor))
+        gpt_str_base = self._create_gpt_str_base(df, t0, typ)
+        anomalyObj = self._create_anomaly_obj(sorted(anomaly_map.keys(), reverse=True), anomaly_map, tbounds, df)
+        gpt_str = ''''''
+        headers = ["metric","anomaly interval mean", "overall mean", "anomaly interval 99th percentile", "overall mean 99th percentile"]
+        for idx,head in enumerate(headers):
+            if idx == len(headers)-1:
+                gpt_str+=head+"\n"
+            else:
+                gpt_str+=head+","
+        for timestamp, objects in anomalyObj.items():
+            gpt_str+=str(timestamp)+":\n"
+            for obj in objects:
+                tmpstr=""
+                for idx,head in enumerate(headers):
+                    if idx == len(headers)-1:
+                        tmpstr+=(str(obj[head])+"\n")
+                    else:
+                        tmpstr+=(str(obj[head])+",")
+                gpt_str+=tmpstr
+        gpt_str_base+=gpt_str
+        # self._save_gpt_str_base(gpt_str_base)
+        gpt_res = self._openAI_req(gpt_str_base)
         vertical = (df.index[t0])
+        tickets=['ss wt concurrentTransactions.write.out','ss wt concurrentTransactions.read.out']
+        for tick in tickets:
+            if  tick not in to_monitor:
+                to_monitor.append(tick)
         self.__plot(df.iloc[tbounds[0]:tbounds[-1]],
-                    to_monitor, main_title="metric-A", vert_x=vertical)
+                    to_monitor, vert_x=vertical,gpt_out=gpt_res)
+
+
 
     def parseAll(self):
-        def delta(metrList):
+        def delta(metrList,prevVal=0):
             mylst = [metrList[i] for i in range(len(metrList))]
             for i in range(1, len(metrList)):
                 mylst[i] -= metrList[i-1]
+            mylst[0]-=prevVal
             return mylst
+        def checkPoint(met):
+            if met.startswith("systemMetrics.disks") and met.endswith("progress"):
+                return True
 
         def checkCriteria(met):
-            if met.startswith("serverStatus.metrics.aggStageCounters") or met.startswith("serverStatus.metrics.commands"):
+            if met.startswith("serverStatus.metrics.aggStageCounters"):
                 return True
-            if met.startswith("systemMetrics.disks"):
+            if met.startswith("systemMetrics.disks") and not met.endswith("progress"):
                 return True
             if met.startswith("replSetGetStatus.members") and (met.endswith("state") or met.endswith("health") or met.endswith("lag")):
                 return True
@@ -391,6 +510,8 @@ DATA:
         date_string = next(iter_keys)
         data = {}
         metObj = self.metricObj[date_string]
+        prevVal = {}
+            
         selected_keys = json.load(open('FTDC_metrics.json', 'r'))
         sel_metr_c = selected_keys["to_monitor_c"]
         sel_metr_p = selected_keys["to_monitor_p"]
@@ -404,12 +525,13 @@ DATA:
         deltactr = len(metObj["serverStatus.start"])
         delta1 = 0
         for met in metObj:
-            if met in sel_metr_p:
+            if met in sel_metr_p or checkPoint(met):
                 data[met] = metObj[met]
 
         for met in metObj:
             # checkCriteria implements string matching for certain cumulative metrics
             if met in sel_metr_c or checkCriteria(met):
+                prevVal[met]=metObj[met][-1]
                 data[met] = delta(metObj[met])
 
         for key in iter_keys:
@@ -439,7 +561,12 @@ DATA:
                 # now fill all the values obtained
                 data[met].extend(metObj[met])
             for met in sel_metr_c_new:
-                data[met].extend(delta(metObj[met]))
+                if met in prevVal:
+                    previous=prevVal[met]
+                else:
+                    previous=0
+                prevVal[met]=metObj[met][-1]
+                data[met].extend(delta(metObj[met],previous))
             delta1 = len(metObj[sel_metr_p_new[0]])
 
             # handle the case where unusual number of nmetrics or ndeltas occur,
