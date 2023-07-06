@@ -1,5 +1,14 @@
 # Notes on FTDC Metrics
 
+## Working:
+1. Decode the FTDC files based on timestamps, each log file is made up of chunks of 5 minutes of data and is named as per the first timestamp in the file. Taking all those files whose timestamps are at a delta of 6 hours absolute from our requested timestamp. `FTDC_capture.py` takes care of this
+2. `FTDC_decoder.py` decodes each timestamp file and passes them as a dictionary of json object(each object containing 300 timepoints), keys of the dictionary are the timestamps in sequence. It creates an analysis object of `FTDC_analysis` to which it passes the dictionary, queryTimestamp, output path and duration. 
+3. `FTDC_analysis.py` takes care of the analysis. It first creates a list of metrics to monitor, deciding whether they are point in time or cumulative in nature. It opens `FTDC_metrics.json` which contains a list of chosen and discarded metrics segregated as required. Then the function first decodes the dictionary to form a dictionary in which (key,value) is metric name and its timeseries as a list. 
+4. Then time bounds are calculated based on queryTimestamp(qT). We check in the interval (qT-2*bucket_duration,qT+bucket_duration) and the point t0 is determined when either avaialable read or write tickets go below 50. Then we check for 12 intervals(1 hour if interval duration is 5 mins) to create the upper and lower limit for analysis.
+5. For each metric, we check for anomaly in this bounds. We first calculate interval wise mean and 99th percentile score. We use InterQuartileRange on mean and IsolationForest on 99 percentile to check for anomalies. If the number of anomalous metrics are more than 60, we run IQR on 99th percentile score as well to perform higher thresholding. Some metrics are included based on their absolute values like cache ratio, dirty cache ratio, history store score etc. [can rewrite cache ratio and dirty cache ratio interval finding - discuss]
+6. After that we use a baseline prompt modified with the type of ticket drop(read/write) and other information. We add the list of anomalies and their mean,99 percentile and average values of both of them across intervals as information to be passed to chatgpt. The prompt is then passed to a function which uses `ChatCompletion` on openAI to return a response. The dataframe and response message is passed to `FTDC_plot` class.
+7. The `FTDC_plot` class takes care of dynamically plotting the graphs(svg) with their details, min and max values. It uses reportlab and svglib to implement it. At the end of all graphs, it appends the summary received from openAI API which is our final output.
+
 ## serverStatus
 
 - `asserts`: Counts number of user assertions, not much useful
@@ -270,5 +279,3 @@ Memory operations such as allocations, frees, and re-allocations are fundamental
 
 While these metrics provide valuable insight, it's important to remember that they are just one piece of the puzzle when monitoring application performance. They should be interpreted in the context of other performance metrics and the specific workload your MongoDB instance is handling. If any of these metrics are trending in an unexpected direction, it might be worth investigating whether changes in your application or workload could be causing increased memory operations.
 
-Working:
-1. Decode the FTDC files based on timestamps, each log file is made up of chunks of 5 minutes of data and is named as per the first timestamp in the file. Taking all those files whose timestamps are at a delta of 6 hours absolute from our requested timestamp. `FTDC_capture.py`
