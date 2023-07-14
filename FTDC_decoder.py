@@ -1,14 +1,21 @@
 import bson
-from sys import argv
 import zlib
 import struct
 import io
 from FTDC_analysis import FTDC_an
 from datetime import datetime,timedelta
 import ctypes
-import pathlib
 import os
 import time
+import argparse
+from urllib.parse import urlparse
+import string 
+import secrets
+import tarfile 
+import requests 
+import boto3
+from botocore.exceptions import NoCredentialsError, ClientError
+import shutil
 
 def int64(uint64_value):
     # Create a ctypes unsigned 64-bit integer from the input value
@@ -29,17 +36,18 @@ def getDTObj(date_string):
     return parsed_datetime
 
 class FTDC:
-    def __init__(self, metric_path,query_dt, outpath='',duration=600):
+    def __init__(self, metric_path,query_dt, outpath='',duration=600, exact=0):
         self.fpath=metric_path
         self.metric_names=[]
         self.prev_metric_list=[]
         self.metric_list={}
         self.metaDocs=[]
         self.rawDataDocs=[]
-        self.tdelta=timedelta(hours=3)
+        self.tdelta=timedelta(hours=2, minutes=30)
         self.qTstamp=query_dt
         self.outpath=outpath
         self.duration=duration
+        self.exact=exact
 
     def read_varuint(self,buf):
         value = 0
@@ -90,6 +98,8 @@ class FTDC:
 
             elif type(data) != str and type(data) != bson.ObjectId:
                 self.metric_names.append(prevkey)
+                if type(data) == bool:
+                    data = int64(int(data))
                 self.metric_list[prevkey]=[data]
 
     def parseBson(self,buf):
@@ -150,9 +160,9 @@ class FTDC:
                 reader.close()
             except Exception as e:
                 print("Failed to extract: ",e)
-        print(ndet_tot)
+        # print(ndet_tot)
         tstamp=(next(iter(accumulate_metrics)))
-        an_obj=FTDC_an(accumulate_metrics,self.qTstamp,self.outpath,self.duration)
+        an_obj=FTDC_an(accumulate_metrics,self.qTstamp,self.outpath,self.duration,self.exact)
         an_obj.parseAll()
 
     def process(self):
@@ -165,49 +175,208 @@ class FTDC:
         self.__extract()
         self.__decodeData()
 
+def validate_directory(value):
+    if not os.path.isdir(value) and not os.path.isfile(value):
+        raise argparse.ArgumentTypeError(f"Directory '{value}' does not exist")
+    return value
+
+def validate_url(value):
+    try:
+        result = urlparse(value)
+        if result.scheme and result.netloc:
+            return value
+        else:
+            raise argparse.ArgumentTypeError('Invalid URL')
+    except ValueError:
+        raise argparse.ArgumentTypeError('Invalid URL')
+
+def validate_timestamp(value):
+    # print(type(value))
+    try:
+        dtobj=datetime.fromtimestamp(int(value)//1000)
+        return dtobj
+    except ValueError:
+        raise argparse.ArgumentTypeError('Invalid timestamp, required format is YYYY-MM-DD HH:MM:SS')
+
+def validate_interval(value):
+    if not value.isdigit() or int(value) <= 0:
+        raise argparse.ArgumentTypeError('Interval should be a positive integer')
+    return int(value)
+
+def find_files(directory, paths=[]):
+    for entry in os.scandir(directory):
+        if entry.is_file():
+            paths.append(entry.path)
+        elif entry.is_dir():
+            find_files(entry.path, paths)
+    return paths
+
+def extract_files_from_tar(file_path, target_path):
+    # Check if the target_path directory exists
+    extracted_files=[]
+    if not os.path.exists(target_path):
+        os.makedirs(target_path)
+    with tarfile.open(file_path) as tar:
+        for member in tar.getmembers():
+            if member.isfile():  # check if it is a file
+                # To extract only files, make sure the output filename does not include any directory structure
+                filename = os.path.basename(member.name)
+                member.name = filename  # reset the member name to just the filename
+                tar.extract(member, path=target_path)  # extract the file
+                extracted_files.append(target_path+"/"+member.name)
+    return extracted_files
+
+
+def download_file(url, destination):
+    response = requests.get(url, stream=True)
+
+    if response.status_code == 200:
+        # Check if the request header contains the file size information
+        file_size = response.headers.get('Content-Length')
+        if file_size is not None:
+            file_size = int(file_size)
+
+        downloaded_size = 0
+        with open(destination, 'wb') as file:
+            for chunk in response.iter_content(chunk_size=2**21):
+                if chunk:
+                    file.write(chunk)
+                    downloaded_size += len(chunk)
+                    # If file size is known, we can calculate the progress
+                    if file_size is not None:
+                        print(f"Downloaded: {downloaded_size / 1024 / 1024:.2f}MB of {file_size / 1024 / 1024:.2f}MB", end='\r')
+                    else:
+                        print(f"Downloaded: {downloaded_size / 1024 / 1024:.2f}MB", end='\r')
+
+        print(f"\nDownload finished. The file was saved to {destination}.")
+    else:
+        print(f"Failed to download the file. Server responded with status code {response.status_code}.")
+
+def upload_file_s3(filepath, key):
+    # validate the file path
+    if not os.path.isfile(filepath):
+        raise ValueError("The file does not exist or is not a file: {}".format(filepath))
+
+    # validate and retrieve environment variables
+    if "AWS_REGION" not in os.environ or "AWS_ACCESS_KEY_ID" not in os.environ or "AWS_SECRET_ACCESS_KEY" not in os.environ or "BUCKET_NAME" not in os.environ:
+        raise EnvironmentError("Required environment variables are not set")
+
+    region = os.getenv('AWS_REGION')
+    aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
+    aws_secret_access_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+    bucket_name = os.getenv('BUCKET_NAME')
+
+    try:
+        # Creating a resource for 's3' 
+        s3_resource = boto3.resource(
+            's3', 
+            region_name = region, 
+            aws_access_key_id = aws_access_key_id,
+            aws_secret_access_key = aws_secret_access_key
+        ) 
+
+        # Upload a file to S3 bucket
+        s3_resource.Bucket(bucket_name).put_object(
+            Key = key, 
+            Body = open(filepath, 'rb')
+        )
+
+        # Creating a client for 's3' 
+        s3_client = boto3.client(
+            's3', 
+            region_name = region, 
+            aws_access_key_id = aws_access_key_id,
+            aws_secret_access_key = aws_secret_access_key
+        )
+        try:
+            # Check if the file was uploaded successfully
+            s3_client.head_object(Bucket=bucket_name, Key=key)
+            print("File was uploaded successfully")
+            # Generate the URL to get 'key-name' from 'bucket-name'
+            url = s3_client.generate_presigned_url(
+                ClientMethod='get_object',
+                Params={
+                    'Bucket': bucket_name,
+                    'Key': key
+                }
+            )
+            return url
+
+        except ClientError:
+            # The file wasn't found. 
+            return "File was not found in the bucket. Upload failed."
+    except NoCredentialsError:
+        return "No AWS credentials were found"
+
+def generate_random_string(length=5):
+    return ''.join(secrets.choice(string.ascii_letters + string.digits) for i in range(length))
+
 if __name__ == "__main__":
+    outFile = "report-"+generate_random_string()+".pdf" #just in case the tar file has no name
+    parser = argparse.ArgumentParser(description="""FTDC Decoder Script. 
+    This script accepts either a tar/directory of input files or a URL to fetch the input data. 
+    It also requires a timestamp to process the data, and an output file path where the results will be written.
+    The interval parameter determines the data aggregation period in minutes. An 'exact' parameter can be set to 1, if we do not want to search for a ticket and assume there is a drop ticket present.""")
+
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--input", type=validate_directory, help="Input directory path")
+    input_group.add_argument("--inputUrl", type=validate_url, help="Input URL")
+
+    parser.add_argument("--timestamp", type=validate_timestamp, required=True, help="Milliseconds from epoch")
+    parser.add_argument("--output", type=str, required=False,default=outFile, help="Output file path")
+    parser.add_argument("--interval", type=validate_interval, required=False, default=5, help="Interval in minutes")
+    parser.add_argument("--exact", type=int, required=False, default=0, help="set the timestamp as drop time t0")
+    args = parser.parse_args()
+    print("Requested Query Timestamp:",args.timestamp)
+    destination=""
+    tarfilename=""
+    if args.inputUrl:
+        file_url = args.inputUrl
+        tarfilename=file_url[file_url.rindex('/')+1:file_url.index('.tar')]
+        file_name = generate_random_string(3)+"_"+tarfilename
+        download_file(file_url,file_name)
+        destination=file_name
+    elif args.input and os.path.isfile(args.input):
+        destination=args.input
+        tarfilename=destination[destination.rindex('/')+1:destination.index('.tar')]
+    if destination != "":
+        out_folder = generate_random_string(10)
+        os.mkdir(out_folder)
+        files=extract_files_from_tar(destination,out_folder)
+    else:
+        files=find_files(args.input)
+        
     st=time.time()
-    if(len(argv)<4):
-        print("use python3 <FTDC_capture.py> <diagnostic.data> <qTstamp> <outfilename> <bucket duration in mins>")
-        exit(1)
     KEY_NAME= 'OPENAI_API_KEY'
     key = os.environ.get(KEY_NAME)
     if key is None:
         print("Please ensure there is an API KEY in the environment variables under OPENAI_API_KEY")
         exit(1)
-    dirPath=pathlib.Path(argv[1])
-    if not dirPath.is_dir():
-        raise("diagnostic.data path is invalid")
-    try:
-        query_dt=getDTObj(argv[2])
-    except Exception as e:
-        print("The queryTimestamp is not of the correct format: Y-m-d_H-M-S")
-        exit(1)
-    files = dirPath.glob("*")
+    # files = dirPath.glob("*")
     filtered_files=[]
-    all_files= [i for i in files if i.name.startswith("metrics") and i.is_file()]
+    all_files= [i for i in files if "metrics" in i]
     all_files.sort()
     # print(all_files)
     for file in all_files:
-        if "interim" not in file.name:
-            # print(file.name)
-            tstamp=convert_to_datetime(file.name[file.name.index('.')+1:])
-            diff=abs(tstamp-query_dt)
+        file_name=file[file.rindex('/')+1:]
+        if "interim" not in file_name:
+            tstamp=convert_to_datetime(file_name[file_name.index('.')+1:])
+            diff=abs(tstamp-args.timestamp)
             if diff <= timedelta(hours=6):
-                # print(diff)
                 filtered_files.append(file)
     filtered_files.sort()
-    if all_files.index(filtered_files[-1]) == len(all_files)-2: # metrics.interim should be included
-        filtered_files.append(all_files[-1])
     if len(filtered_files)==0:
         raise ValueError("No files corresponding to the queryTimestamp found. Please check the timestamp/path and try again!")
-    # print(filtered_files)
-    if len(argv)==5:
-        duration=int(float(argv[4])*60)
-        print("bucket duration set to: ",duration, "seconds")
-        decoder = FTDC(filtered_files,query_dt,argv[3],duration)
-    else:
-        decoder = FTDC(filtered_files,query_dt,argv[3])
+    if all_files.index(filtered_files[-1]) == len(all_files)-2: # metrics.interim should be included
+        filtered_files.append(all_files[-1])
+    report_filename = "report-"+tarfilename+".pdf"
+    decoder = FTDC(filtered_files,args.timestamp,report_filename,args.interval*60, args.exact)
     decoder.process()
-    st=time.time()-st
-    print("Runtime in seconds: ",st)
+    # st=time.time()-st
+    if os.path.isfile(report_filename):
+        print("report locally saved as:",report_filename)
+        downloadUrl = upload_file_s3(report_filename,report_filename)
+        print(downloadUrl)
+    if destination!="":
+        shutil.rmtree(out_folder)
+    # print("Runtime in seconds: ",st)
