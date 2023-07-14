@@ -30,13 +30,18 @@ def convert_to_datetime(datetime_str):
     datetime_obj = datetime.strptime(datetime_str, datetime_format)
     return datetime_obj
 
-def getDTObj(date_string):
-    format_string = "%Y-%m-%d_%H-%M-%S"
-    parsed_datetime = datetime.strptime(date_string, format_string)
-    return parsed_datetime
-
 class FTDC:
     def __init__(self, metric_path,query_dt, outpath='',duration=600, exact=0):
+        '''
+        Initialises the FTDC object with the specified parameters.
+
+        Args:
+            metric_path (str): Path to the metric.
+            query_dt (str): Query date.
+            outpath (str, optional): Path to output. Defaults to ''.
+            duration (int, optional): Duration in seconds. Defaults to 600 (10 minutes).
+            exact (int, optional): If set to 1, performs an exact match. Defaults to 0.
+        '''
         self.fpath=metric_path
         self.metric_names=[]
         self.prev_metric_list=[]
@@ -50,6 +55,14 @@ class FTDC:
         self.exact=exact
 
     def read_varuint(self,buf):
+        '''
+        Reads an unsigned integer from a buffer.
+
+        Args:
+            buf (Buffer): The buffer to read from.
+
+        Returns:
+            int: The read unsigned integer.'''
         value = 0
         shift = 0
         while True:
@@ -64,6 +77,9 @@ class FTDC:
         return value
     
     def __extract(self):
+        '''
+        Extracts metadata and raw data documents from the items.
+        '''
         for doc in self.items:
             if int(doc['type'])==1:
                 self.rawDataDocs.append(doc)
@@ -71,6 +87,21 @@ class FTDC:
                 self.metaDocs.append(dict(doc))
         
     def create_metric(self, data, prevkey=""):
+        '''
+        Recursively creates metrics from the provided data. This method traverses the data which can be a dictionary,
+        a list, or a scalar value (such as an integer, a boolean, or a datetime). It generates metric names based on
+        the keys of the dictionary or the indices of the list. For scalar values, it directly appends them to the metric
+        list with their corresponding metric names. Special cases are handled for data types like 'bson.timestamp.Timestamp'
+        and 'datetime', where they are converted to milliseconds epoch before storing. String and 'bson.objectid.ObjectId' 
+        types are ignored.
+
+        Args:
+            data (dict or list or scalar): The input data from which to create the metrics. This data can be a nested 
+                                        dictionary or list containing further dictionaries, lists or scalar values.
+            prevkey (str, optional): The key name from the previous level of recursion. It is used to form the metric 
+                                    name by concatenating it with the current level's key or index. Defaults to "".
+
+        '''
         if isinstance(data, dict):
             for key,val in data.items():
                 if prevkey=="":
@@ -83,7 +114,7 @@ class FTDC:
                 nkey=prevkey+"._"+str(idx)
                 self.create_metric(item,nkey)
         else:
-            if type(data) == bson.Timestamp:
+            if type(data) == bson.timestamp.Timestamp:
                 k0=prevkey
                 k1=prevkey+".inc"
                 self.metric_names.append(k0)
@@ -96,13 +127,18 @@ class FTDC:
                 self.metric_names.append(prevkey)
                 self.metric_list[prevkey]=[ms_epoch]
 
-            elif type(data) != str and type(data) != bson.ObjectId:
+            elif type(data) != str and type(data) != bson.objectid.ObjectId:
                 self.metric_names.append(prevkey)
                 if type(data) == bool:
                     data = int64(int(data))
                 self.metric_list[prevkey]=[data]
 
-    def parseBson(self,buf):
+    def parseBson(self, buf):
+        '''
+        The parseBson function parses BSON (Binary JSON) data from a buffer.
+        It reads the size of the BSON data, unpacks it, and reads the remaining bytes to obtain the complete BSON data.
+        It then decodes the data and returns the BSON object if successful, or None if there are incomplete or invalid data.
+        '''
         size_data = buf.read(4)
         if len(size_data) < 4:
             return None  # Incomplete data, cannot form a valid BSON object
@@ -112,11 +148,41 @@ class FTDC:
         if len(data) < size:
             return None  # Incomplete data, cannot form a valid BSON object
         try:
-            return bson.decode(data)  # Decode the BSON data
-        except bson.InvalidBSON:
+            return bson.BSON.decode(data)  # Decode the BSON data
+            # bson.BSON.decode
+        except bson.errors.InvalidBSON:
             return None  # Invalid BSON data
         
     def __decodeData(self):
+        '''
+        This method decodes and processes data stored in BSON format, and compresses it with zlib compression.
+
+        It iterates through each document in rawDataDocs. Each document is decompressed and parsed. If the parsed data's start 
+        time is within a specified range, the method creates metrics from the parsed data.
+
+        The method then unpacks and reads certain metrics from the reader, and stores each metric's values in the metric_list. 
+        For each metric, the method also reads variable-length unsigned integer deltas and adds them to the base_val (first value 
+        of each metric) to calculate the subsequent values. If a delta is zero, the method reads the next value as the number 
+        of zeros to be inserted. If the base value is a datetime object, the delta is added as seconds to the base_val. Otherwise, 
+        the delta is directly added to the base_val.
+
+        After all deltas are processed for a metric, the method updates the timestamp and stores the metric_list in the 
+        accumulate_metrics dictionary. The metric_list and metric_names are then reset for the next document.
+
+        If an exception occurs at any point, an error message is printed.
+
+        Finally, the method instantiates an FTDC_an object and calls its parseAll method.
+
+        Note:
+        FTDC (Full Time Diagnostic Data Capture) is a method used in MongoDB for capturing and storing server status data.
+
+        Args:
+        No arguments are required.
+
+        Returns:
+        None, but the method modifies the state of the object by setting various internal properties and instantiating 
+        a FTDC_an object.
+        '''
         accumulate_metrics={}
         ndet_tot=0
         for doc in self.rawDataDocs:
@@ -127,6 +193,7 @@ class FTDC:
                 res=self.parseBson(reader)
                 if abs(res['start']-self.qTstamp) > self.tdelta:
                     continue
+                print(res['start'])
                 self.create_metric(res)
                 stats=reader.read(8)
                 nmetrics,ndeltas=(struct.unpack("<I", stats[0:4]),struct.unpack("<I", stats[4:8]))
@@ -152,8 +219,8 @@ class FTDC:
                         else:
                             base_val= base_val + int64(delta)
                         self.metric_list[self.metric_names[met_idx]].append(base_val)
-                tstamp=datetime.fromtimestamp(self.metric_list['start'][0]/1000)
-                tstamp=tstamp.strftime("%Y-%m-%d_%H-%M-%S")
+                tstamp=datetime.utcfromtimestamp(self.metric_list['start'][0]/1000)
+                # tstamp=tstamp.strftime("%Y-%m-%d_%H-%M-%S")
                 accumulate_metrics[tstamp]=self.metric_list
                 self.metric_list={}
                 self.metric_names=[]
@@ -176,11 +243,17 @@ class FTDC:
         self.__decodeData()
 
 def validate_directory(value):
+    """
+    Validates whether the given value is a directory or a file.
+    """
     if not os.path.isdir(value) and not os.path.isfile(value):
         raise argparse.ArgumentTypeError(f"Directory '{value}' does not exist")
     return value
 
 def validate_url(value):
+    """
+    Validates whether the given value is a valid URL.
+    """
     try:
         result = urlparse(value)
         if result.scheme and result.netloc:
@@ -191,19 +264,27 @@ def validate_url(value):
         raise argparse.ArgumentTypeError('Invalid URL')
 
 def validate_timestamp(value):
-    # print(type(value))
+    """
+    Validates whether the given value is a valid timestamp.
+    """
     try:
-        dtobj=datetime.fromtimestamp(int(value)//1000)
+        dtobj=datetime.utcfromtimestamp(int(value)//1000)
         return dtobj
     except ValueError:
         raise argparse.ArgumentTypeError('Invalid timestamp, required format is YYYY-MM-DD HH:MM:SS')
 
 def validate_interval(value):
+    """
+    Validates whether the given value is a positive integer.
+    """
     if not value.isdigit() or int(value) <= 0:
         raise argparse.ArgumentTypeError('Interval should be a positive integer')
     return int(value)
 
 def find_files(directory, paths=[]):
+    """
+    Recursively finds all files in a given directory.
+    """
     for entry in os.scandir(directory):
         if entry.is_file():
             paths.append(entry.path)
@@ -212,26 +293,28 @@ def find_files(directory, paths=[]):
     return paths
 
 def extract_files_from_tar(file_path, target_path):
-    # Check if the target_path directory exists
+    """
+    Extracts all files from a tar file into a target directory.
+    """
     extracted_files=[]
     if not os.path.exists(target_path):
         os.makedirs(target_path)
     with tarfile.open(file_path) as tar:
         for member in tar.getmembers():
-            if member.isfile():  # check if it is a file
-                # To extract only files, make sure the output filename does not include any directory structure
+            if member.isfile(): 
                 filename = os.path.basename(member.name)
-                member.name = filename  # reset the member name to just the filename
-                tar.extract(member, path=target_path)  # extract the file
+                member.name = filename  
+                tar.extract(member, path=target_path)
                 extracted_files.append(target_path+"/"+member.name)
     return extracted_files
 
-
 def download_file(url, destination):
+    """
+    Downloads a file from a given URL to a local destination.
+    """
     response = requests.get(url, stream=True)
 
     if response.status_code == 200:
-        # Check if the request header contains the file size information
         file_size = response.headers.get('Content-Length')
         if file_size is not None:
             file_size = int(file_size)
@@ -242,17 +325,39 @@ def download_file(url, destination):
                 if chunk:
                     file.write(chunk)
                     downloaded_size += len(chunk)
-                    # If file size is known, we can calculate the progress
                     if file_size is not None:
                         print(f"Downloaded: {downloaded_size / 1024 / 1024:.2f}MB of {file_size / 1024 / 1024:.2f}MB", end='\r')
                     else:
                         print(f"Downloaded: {downloaded_size / 1024 / 1024:.2f}MB", end='\r')
 
-        print(f"\nDownload finished. The file was saved to {destination}.")
+        print(f"\nDownload finished. The file was saved to {destination}")
     else:
         print(f"Failed to download the file. Server responded with status code {response.status_code}.")
 
+
 def upload_file_s3(filepath, key):
+    '''
+    Uploads a file to an AWS S3 bucket.
+
+    The function first checks if the file exists and if the necessary environment variables are set. 
+    Then, it creates an S3 resource object using the AWS credentials, and uploads the file to the specified 
+    S3 bucket. After uploading, it creates an S3 client object and tries to retrieve the uploaded file 
+    to ensure that it was uploaded successfully. If the file is uploaded, the function returns the file's 
+    presigned URL which can be used to access the file. If the file wasn't found in the bucket or if there 
+    were no credentials found, the function returns an appropriate error message.
+
+    Args:
+        filepath (str): The local path to the file to be uploaded.
+        key (str): The name that will be used for the file in the S3 bucket.
+
+    Returns:
+        str: The presigned URL of the uploaded file if the upload was successful, 
+             or an error message if the upload failed.
+
+    Raises:
+        ValueError: If the provided file path does not point to a file.
+        EnvironmentError: If the necessary environment variables are not set.
+    '''
     # validate the file path
     if not os.path.isfile(filepath):
         raise ValueError("The file does not exist or is not a file: {}".format(filepath))
@@ -316,7 +421,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="""FTDC Decoder Script. 
     This script accepts either a tar/directory of input files or a URL to fetch the input data. 
     It also requires a timestamp to process the data, and an output file path where the results will be written.
-    The interval parameter determines the data aggregation period in minutes. An 'exact' parameter can be set to 1, if we do not want to search for a ticket and assume there is a drop ticket present.""")
+    The interval parameter determines the data aggregation period in minutes. 
+    An 'exact' parameter can be set to 1, if we do not want to search for a ticket and assume there is a drop ticket present.""")
 
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument("--input", type=validate_directory, help="Input directory path")
@@ -333,7 +439,7 @@ if __name__ == "__main__":
     if args.inputUrl:
         file_url = args.inputUrl
         tarfilename=file_url[file_url.rindex('/')+1:file_url.index('.tar')]
-        file_name = generate_random_string(3)+"_"+tarfilename
+        file_name = generate_random_string(3)+"_"+tarfilename+file_url[file_url.index('.tar'):]
         download_file(file_url,file_name)
         destination=file_name
     elif args.input and os.path.isfile(args.input):
@@ -343,6 +449,8 @@ if __name__ == "__main__":
         out_folder = generate_random_string(10)
         os.mkdir(out_folder)
         files=extract_files_from_tar(destination,out_folder)
+        if args.inputUrl:
+            os.remove(destination)
     else:
         files=find_files(args.input)
         
@@ -365,6 +473,7 @@ if __name__ == "__main__":
             if diff <= timedelta(hours=6):
                 filtered_files.append(file)
     filtered_files.sort()
+    print(filtered_files)
     if len(filtered_files)==0:
         raise ValueError("No files corresponding to the queryTimestamp found. Please check the timestamp/path and try again!")
     if all_files.index(filtered_files[-1]) == len(all_files)-2: # metrics.interim should be included

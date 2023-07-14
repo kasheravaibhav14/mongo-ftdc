@@ -29,7 +29,7 @@
 - `opCounters`[serverStatus.opcounters]:
     - `insert`, `query`, `update`, `delete`, `getmore`, `command`
     - These reflect recieved/requested operations, not necessary successful ones.
-    - Bulk insert or multi update are counted as a singl operation
+    - Bulk insert or multi update are counted as a single operation
 
 - `opCountersRepl`[serverStatus.opcountersRepl]:
     - `insert`, `query`, `update`, `delete`, `getmore`, `command`

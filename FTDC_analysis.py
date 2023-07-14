@@ -3,12 +3,15 @@ from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 from sklearn.ensemble import IsolationForest
-import openai
 import os
 import time
+import requests
 from FTDC_plot import FTDC_plot
 
 class FTDC_an:
+    '''
+    
+    '''
     def __init__(self, metricObj, qTstamp, outPDFpath, duration, exact):
         self.metricObj = metricObj
         self.queryTimeStamp = qTstamp
@@ -20,6 +23,7 @@ class FTDC_an:
         self.meanThreshold = 1.25
         self.totalTickets = 128
         self.exact = exact
+        self.openai_api_key=os.getenv("OPENAI_API_KEY")
 
     def __plot(self, df, to_monitor, vert_x, gpt_out=""):
         to_monitor.sort()
@@ -40,11 +44,6 @@ class FTDC_an:
             ccol = ccol.replace("aggStageCounters.", "aggCnt ")
             rename_cols[col_name] = ccol
         df.rename(columns=rename_cols, inplace=True)
-
-    def getDTObj(self, date_string):
-        format_string = "%Y-%m-%d_%H-%M-%S"
-        parsed_datetime = datetime.strptime(date_string, format_string)
-        return parsed_datetime
 
     def getDTFromSecs(self, ms):
         return datetime.fromtimestamp(ms/1000)
@@ -134,12 +133,36 @@ class FTDC_an:
             metricObj[newkey].append(
                 (metricObj[tcmalloc][idx]-metricObj[wtcache][idx])/mib_conv)
             
-    def calcBounds(self, df, pos, delt):  # if our bucket is 5 mins each, delt is 2.5 mins
+    def calcBounds(self, df, pos, delt):
+        '''
+        Calculate the bounds of a range within a DataFrame based on certain conditions.
+
+        The function scans the DataFrame within a certain range, defined by the index of query timestamp(`pos`) and and interval duration.
+        `delt` represents half of the time interval of a bucket
+        It checks for conditions where read and write tickets fall below a specified limit. If both, 
+        write or read ticket counts fall below the limit, it sets the starting point 't0' and type 'typ' 
+        of the drop accordingly. 
+        
+        If no such conditions are met it sets 't0' to 'pos'. 
+        If check is specified as 1, we ovveride the search process and set `t0` to `pos` instead.
+        It then fills `tbounds` with the indices of the start of each interval in the dataframe. 
+        Two consecutive values in `tbounds` can be used to slice an interval equal to the duration of the bucket.
+
+        Args:
+            df (pandas.DataFrame): The DataFrame to scan for ticket drops.
+            pos (int): The center of the range to scan for ticket drops.
+            delt (int): The half-width of each bucket, in the same time units as the DataFrame index.
+
+        Returns:
+            tbounds (list): A list of DataFrame indices bounding the intervals leading to where ticket drops were found. The last bucket is the ticket drop itself.
+            t0 (int): The index of the DataFrame where the first ticket drop was found.
+            typ (int): The type of the first ticket drop found: 0 for both, 1 for write, 2 for read, -1 if none.
+        '''
         tbounds = []
         t0 = -1
         typ = -1
         pos1 = max(0,pos-self.tdelta*2)
-        pos2 = min(pos+self.tdelta*6,len(df))
+        pos2 = min(pos+self.tdelta*6,len(df)-1)
         read_ticket = 'ss wt concurrentTransactions.read.available'
         write_ticket = 'ss wt concurrentTransactions.write.available'
         for idx in range(pos1, pos2):
@@ -177,6 +200,22 @@ class FTDC_an:
         return tbounds, t0, typ
 
     def has_outliers(self, data):
+        '''
+        Checks whether a data array contains outliers, based on the IQR method.
+
+        The method calculates the first quartile (Q1) and third quartile (Q3) of the data array, and computes the 
+        interquartile range (IQR). Outliers are defined as any values that fall below Q1 minus a multiplier times IQR, 
+        or above Q3 plus a multiplier times IQR. The function then checks the data array for these outliers and if it 
+        finds an outlier, it checks if it is located within the last 'self.anomalyBuckets' elements of the array.
+
+        Args:
+            data (list or numpy.ndarray): The array of data to check for outliers.
+
+        Returns:
+            tuple: A tuple where the first element is a boolean that is True if there is an outlier in the last 
+            'self.anomalyBuckets' elements and False otherwise, and the second element is the index of the last 
+            outlier if there is one, or the total number of data points otherwise.
+        '''
         multiplier = self.meanThreshold
         Q1 = np.percentile(data, 25)
         Q3 = np.percentile(data, 75)
@@ -208,6 +247,22 @@ class FTDC_an:
         return False, ctr
 
     def percentileChange(self, data, cont=0.2):
+        '''
+        Detects outliers in the data using the Isolation Forest method.
+
+        The method reshapes the data array and fits an IsolationForest model on it. It then predicts the outliers
+        using the model and checks if there are any. If there are outliers, it finds the index of the last one and 
+        checks if it is within the last 'self.anomalyBuckets' elements of the array.
+
+        Args:
+            data (list or numpy.ndarray): The array of data to check for outliers.
+            cont (float): The contamination parameter for the IsolationForest model.
+
+        Returns:
+            tuple: A tuple where the first element is a boolean that is True if the last outlier is within the 
+            last 'self.anomalyBuckets' elements and False otherwise, and the second element is the index of the 
+            last outlier if there is one, or 0 otherwise.
+        '''
         # Ensure data is a numpy array and reshape it.
         data = np.array(data).reshape(-1, 1)
 
@@ -295,6 +350,13 @@ class FTDC_an:
         return False, 0, ()
 
     def _init_analytics(self, metricObj):
+        '''
+        Initializes analytics by calling specific analytics methods for given metric object. 
+        Each method creates a derived metric based on the existing metrics in FTDC
+    
+        Args:
+            metricObj (dict): Metric object containing relevant metrics data.
+        '''
         # self.__getAverageLatencies(metricObj)
         self.__tcmallocminuswt(metricObj)
         self.__getMemoryFragRatio(metricObj)
@@ -303,10 +365,21 @@ class FTDC_an:
         self.__diskUtilization(metricObj)
 
     def _prepare_dataframe(self, metricObj):
+        '''
+            Prepares a dataframe from the given metric object. It transforms 'serverStatus.start' into a datetime format,
+        drops the first row(since certain metrics are cumulative in nature, the first point in the dataframe can appear as an outlier), sets 'serverStatus.start' as the index of the dataframe, and renames columns using 
+        '__renameCols' function.
+
+        Args:
+            metricObj (dict): Metric object containing relevant metrics data.
+
+        Returns:
+            df (pandas.DataFrame): Prepared dataframe.'''
         df = pd.DataFrame(metricObj)
         df['serverStatus.start'] = df['serverStatus.start'].apply(
             self.getDTFromSecs)
-        df['serverStatus.start'] = pd.to_datetime(df['serverStatus.start'])
+        print(df['serverStatus.start'])
+        # df['serverStatus.start'] = pd.to_datetime(df['serverStatus.start'])
         df.drop(index=0)
         df.set_index('serverStatus.start', inplace=True)
         df.columns.name = 'metrics'
@@ -315,22 +388,20 @@ class FTDC_an:
         return df
 
     def _calculate_anomalies(self, df, tbounds, to_monitor):
-        def compare_strings(s): # sorting for getting prompt better
-            if s.startswith("ss wt concurrentTransactions."):
-                return (0, s)
-            elif s.startswith("ss wt cache"):
-                return (1, s)
-            elif s.startswith("ss wt"):
-                return (2, s)
-            elif s.startswith("ss metrics"):
-                return (3, s)
-            elif s.startswith("ss opcounters"):
-                return (5, s)
-            else:
-                return (6, s)
+        '''
+        Checks each metric in the dataframe for anomalies. If an anomaly is found and the metric doesn't start with
+        "sm disks" and end with "io_time_ms", the metric is added to 'to_monitor' list and the anomaly is added to 
+        'anomaly_map' dictionary using '_update_anomaly_map' function.
+
+        Args:
+            df (pandas.DataFrame): Dataframe to check for anomalies.
+            tbounds (list): List of time bounds.
+            to_monitor (list): List to store metrics that should be monitored.
+
+        Returns:
+            tuple: Anomaly map and list of metrics to monitor.
+        '''
         anomaly_map = {}
-        myList = df.columns.tolist()
-        myList.sort(key=compare_strings)
         for metric in df.columns:
             try:
                 tr, idx, val = self.check_metric(df, metric, tbounds)
@@ -344,12 +415,53 @@ class FTDC_an:
         return anomaly_map, to_monitor
 
     def _update_anomaly_map(self, metric, idx, val, anomaly_map):
+        '''
+        Adds a new anomaly to the anomaly map. It creates a new list of anomalies for a new index. The anomalies 
+        are sorted using 'compare_strings' function.
+
+        Args:
+            metric (str): The name of the metric.
+            idx (int): The index where the anomaly was found.
+            val (list): The values associated with the anomaly.
+            anomaly_map (dict): Dictionary to store anomalies.
+
+        Returns:
+        dict: Updated anomaly map.
+        '''
+        def compare_strings(lst): # custom sort function to improve chat prompt based by ordering metrics in order of importance
+            s=lst[0]
+            if s.startswith("ss wt concurrentTransactions."):
+                return (0, s)
+            elif s.startswith("ss metrics"):
+                return (1, s)
+            elif s.startswith("ss opcounters"):
+                return (2, s)
+            elif s.startswith("ss wt cache"):
+                return (3, s)
+            elif s.startswith("ss wt"):
+                return (4, s)
+            else:
+                return (6, s)
         if idx not in anomaly_map:
             anomaly_map[idx] = []
         anomaly_map[idx].append([metric, val[0], val[1], val[2], val[3]])
+        anomaly_map[idx].sort(key=compare_strings)
         return anomaly_map
 
     def _create_anomaly_obj(self, sorted_keys, anomaly_map, tbounds, df):
+        '''
+        Creates an anomaly object from the anomaly map. The anomaly object is a dictionary where the keys are time 
+        stamps in string format and the values are lists of dictionaries, each containing information about an anomalous metrics.
+
+        Args:
+            sorted_keys (list): List of sorted keys.
+            anomaly_map (dict): Dictionary storing anomalies.
+            tbounds (list): List of time bounds.
+            df (pandas.DataFrame): Dataframe to retrieve the timestamp from.
+
+        Returns:
+            dict: Anomaly object.
+        '''
         anomalyObj = {}
         for ts in sorted_keys:
             tsss = str(df.index[tbounds[ts]])
@@ -374,7 +486,7 @@ class FTDC_an:
 TASK: Your task, as a MongoDB diagnostic specialist, is to analyze the given data with reference to MongoDB and WiredTiger engine metrics to determine the ticket drop's root cause. Please analyze each and every metric listed in the list provided.
 
 Important thresholds and information include:
-1. Analyze ss metrics commands, operation, queryExecutor, etc. and opCounters (updates, deletes etc.). Any surge in opCounters or any ss metrics(commands, operation, queryExecutor) is indicative of increase in workload,a potential reason for a ticket drop which *must* be included in analysis. 
+1. Start with analyzing ss metrics commands, operation, queryExecutor, etc. and opCounters (updates, deletes etc.). Any surge in any of these is indicative of increase in workload, which could be a potential indicator of ticket drop and must be included in analysis. 
 2. Examine cache dirty/fill ratios. When cache dirty ratio surpasses 5%, eviction is initiated by worker threads and on crossing 20%, by application threads. A cache fill ratio over 80% initiates worker thread eviction and above 95% starts application thread eviction.
 3. Reviewing eviction statistics due to their impact on worker threads and cache. Remember that evicting a modified page demands more resources.
 4. Check 'cursor.cached cursor count', a measure of currently cached cursors by the WiredTiger engine.
@@ -407,42 +519,43 @@ NOTE: The focus is on in-depth analysis, so please refer to definitions and deta
         with open("gpt-input.txt", 'w') as gpt:
             gpt.write(gpt_str_base)
 
+
     def _openAI_req(self, message):
-        KEY_NAME = 'OPENAI_API_KEY'
-        req = {"model": "gpt-4",
-               "messages": [{"role": "user", "content": message}]}
-        # return ""
-        key = os.environ.get(KEY_NAME)
-        if key is not None:
-            openai.api_key = key
-            try:
-                completion = openai.ChatCompletion.create(
-                    model="gpt-4",
-                    messages=[
-                        {"role": "user", "content": message}
-                    ]
-                )
-                outp = completion.choices[0].message.content
-                print(outp)
-            except Exception as e:
-                print(e)
-                print("Generating report without summary as openAI failed to respond.")
-                outp = ""
-            return outp
-        else:
-            print("No openAI API key found in the environment variable")
-            return ""
+        url = "https://api.openai.com/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.openai_api_key}",
+            "Content-Type": "application/json"
+        }
+
+        data = {
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": message}]
+        }
+
+        try:
+            response = requests.post(url, headers=headers, data=json.dumps(data))
+            response.raise_for_status()  # This will raise an exception for HTTP errors
+            completion = response.json()
+            outp = completion['choices'][0]['message']['content']
+            print(outp)
+        except Exception as e:
+            print(e)
+            print("Generating report without summary as openAI failed to respond.")
+            outp = ""
+        return outp
+
 
     def analytics(self, metricObj, queryTimestamp):
         self._init_analytics(metricObj)
         df = self._prepare_dataframe(metricObj)
-        df.to_csv('test.csv')
         # print(df)
+        print(queryTimestamp)
+        print(df.index)
         pos = np.where(df.index == queryTimestamp)[0][0]
         tbounds, t0, typ = self.calcBounds(df, pos, self.tdelta//2)
         if typ == -1:
             pos1 = df.index[max(0,pos-self.tdelta*2)]
-            pos2 = df.index[min(pos+self.tdelta*6,len(df))]
+            pos2 = df.index[min(pos+self.tdelta*6,len(df)-1)]
             print(
                 f"No ticket drop found in the interval {pos1} and {pos2}. Please try with another timestamp or a higher interval size. Currently generating graphs corresponding to query")
         to_monitor = []
@@ -472,7 +585,7 @@ NOTE: The focus is on in-depth analysis, so please refer to definitions and deta
                             tmpstr += (str(obj[head])+",")
                     gpt_str += tmpstr
             gpt_str_base += gpt_str
-            # self._save_gpt_str_base(gpt_str_base)
+            self._save_gpt_str_base(gpt_str_base)
             st=time.time()
             gpt_res = self._openAI_req(gpt_str_base)
             st=time.time()-st
@@ -536,16 +649,26 @@ NOTE: The focus is on in-depth analysis, so please refer to definitions and deta
             if met in sel_metr_c or checkCriteria(met):
                 prevVal[met] = metObj[met][-1]
                 data[met] = delta(metObj[met])
-
+        # skipDT = None
         for key in iter_keys:
             metObj = self.metricObj[key]
+            # print(key, len(metObj["serverStatus.start"]), len(metObj))
+            # if skipDT != None and float(metObj["serverStatus.start"][0]) < skipDT:
+            #     continue
+            # else:
+            #     skipDT = None
+                # for key in data:
+                #     print(key,len(data[key]))
             try:
                 if "serverStatus.uptime" not in metObj or prevUptime > metObj["serverStatus.uptime"][0]:
-                    for key in prevVal:
-                        prevVal[key]=0
+                    break
+                    for pkey in prevVal:
+                        prevVal[pkey]=0
+                    print(metObj["serverStatus.start"][0],type(metObj["serverStatus.start"]))
+                    skipDT = float(metObj["serverStatus.start"][0]) + 300000
             except:
-                print(key)
                 exit(0)
+                # print(pkey)
             sel_metr_c_new = [s for s in metObj.keys() if (
                 s in sel_metr_c or checkCriteria(s))]
             sel_metr_p_new = [s for s in metObj.keys() if s in sel_metr_p]
@@ -581,9 +704,11 @@ NOTE: The focus is on in-depth analysis, so please refer to definitions and deta
 
             # handle the case where unusual number of nmetrics or ndeltas occur,
             # i.e. less metrics are reported compared to previous iteration, so fill with zeros for point in time data and previous value for accumulative data
+            
             for met in data:
                 if met not in sel_metr_p_new and not checkCriteria(met) and met not in sel_metr_c:
-                    data[met].extend([0] * delta1)
+                    prev_val = data[met][-1]
+                    data[met].extend([prev_val] * delta1)
                 elif met not in sel_metr_c_new and met not in sel_metr_p:
                     prev_val = data[met][-1]
                     data[met].extend([prev_val] * delta1)

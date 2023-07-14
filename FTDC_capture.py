@@ -3,6 +3,7 @@ from sys import argv
 from datetime import datetime,timedelta
 from FTDC_decoder import FTDC
 import time
+import os 
 
 def convert_to_datetime(datetime_str):
     datetime_format = "%Y-%m-%dT%H-%M-%SZ-%f"
@@ -19,6 +20,11 @@ if __name__ == "__main__":
     if(len(argv)<4):
         print("use python3 <FTDC_capture.py> <diagnostic.data> <qTstamp> <outfilename> <bucket duration in mins>")
         exit(1)
+    KEY_NAME= 'OPENAI_API_KEY'
+    key = os.environ.get(KEY_NAME)
+    if key is None:
+        print("Please ensure there is an API KEY in the environment variables under OPENAI_API_KEY")
+        exit(1)
     dirPath=pathlib.Path(argv[1])
     if not dirPath.is_dir():
         raise("diagnostic.data path is invalid")
@@ -30,7 +36,7 @@ if __name__ == "__main__":
     files = dirPath.glob("*")
     filtered_files=[]
     for file in files:
-        if file.is_file() and "interim" not in file.name :
+        if file.is_file() and "interim" not in file.name and file.name.startswith("metrics"):
             # print(file.name)
             tstamp=convert_to_datetime(file.name[file.name.index('.')+1:])
             diff=abs(tstamp-query_dt)
@@ -40,7 +46,7 @@ if __name__ == "__main__":
 
     filtered_files.sort()
     if len(filtered_files)==0:
-        raise("No files corresponding to the queryTimestamp found. Please check the timestamp/path and try again!")
+        raise ValueError("No files corresponding to the queryTimestamp found. Please check the timestamp/path and try again!")
     print(filtered_files)
     if len(argv)==5:
         duration=int(float(argv[4])*60)
